@@ -13,4 +13,19 @@ pub enum LpDepositError {
 
     #[msg("Invalid deposit mint")]
     InvalidDepositMint,
+
+    #[msg("Invalid position nft owner")]
+    InvalidPositionNftOwner,
+
+    #[msg("Invalid position nft account")]
+    InvalidPositionNftAccount,
+
+    #[msg("Invalid fee token account")]
+    InvalidFeeTokenAccount,
+
+    #[msg("Invalid remaining accounts")]
+    InvalidRemainingAccounts,
+
+    #[msg("Invalid sqrt price")]
+    InvalidSqrtPrice,
 }

@@ -1,17 +1,22 @@
 use anchor_lang::prelude::*;
 use raydium_amm_v3::libraries::{liquidity_math, U256};
 
+use crate::LpDepositError;
+
 pub fn calc_min_amount_out(
     swap_amount: u64,
     is_base_input: bool,
     sqrt_price_x64: u128,
     slippage_bps: u16,
-) -> u64 {
+) -> Result<u64> {
+    require!(slippage_bps <= 10_000, LpDepositError::InvalidSlippage);
+
     let amount_in = U256::from(swap_amount as u128);
     let sqrt_price = U256::from(sqrt_price_x64);
 
     // 计算价格 P = sqrt_price^2 / 2^64 (仍然是 Q64.64)
     let price_q128 = (sqrt_price * sqrt_price) >> 64; // Q64.64
+    require!(!price_q128.is_zero(), LpDepositError::InvalidSqrtPrice);
 
     let slippage_factor = U256::from(10_000u128 - slippage_bps as u128);
 
@@ -38,7 +43,7 @@ pub fn calc_min_amount_out(
         (raw * slippage_factor) / U256::from(10_000u128)
     };
 
-    out.as_u64()
+    Ok(out.as_u64())
 }
 
 /// 使用 Raydium liquidity_math 计算最优 swap 数量
@@ -73,4 +78,24 @@ pub fn calculate_optimal_swap_amount(
         let swap_amount = (deposit_amount).checked_sub(amount_1_needed).unwrap_or(0);
         return Ok((swap_amount, amount_0_needed));
     }
+}
+
+/// 计算“移除指定 liquidity”时应退回的 principal（不含手续费/奖励）数量
+/// 说明：CLMM 中 principal 由当前价格与区间决定；奖励/手续费不属于 principal。
+pub fn calculate_principal_amounts_for_liquidity(
+    current_tick: i32,
+    sqrt_price_current_x64: u128,
+    tick_lower_index: i32,
+    tick_upper_index: i32,
+    liquidity: u128,
+) -> Result<(u64, u64)> {
+    let liquidity_i128 = i128::try_from(liquidity).map_err(|_| LpDepositError::MathOverflow)?;
+    let (amount_0, amount_1) = liquidity_math::get_delta_amounts_signed(
+        current_tick,
+        sqrt_price_current_x64,
+        tick_lower_index,
+        tick_upper_index,
+        liquidity_i128,
+    )?;
+    Ok((amount_0, amount_1))
 }

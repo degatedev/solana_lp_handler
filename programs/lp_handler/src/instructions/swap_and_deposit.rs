@@ -11,6 +11,19 @@ use anchor_spl::token_interface::{Mint, Token2022, TokenAccount};
 use raydium_amm_v3::program::AmmV3;
 use raydium_amm_v3::states::{AmmConfig, ObservationState, PoolState, TickArrayState};
 
+fn derive_ata_address(
+    owner: &Pubkey,
+    mint: &Pubkey,
+    token_program: &Pubkey,
+    ata_program: &Pubkey,
+) -> Pubkey {
+    Pubkey::find_program_address(
+        &[owner.as_ref(), token_program.as_ref(), mint.as_ref()],
+        ata_program,
+    )
+    .0
+}
+
 /// swap_and_deposit 所需的所有账户
 /// 包含 swap_v2 和 open_position_v2 的全部账户（有些可以复用，比如 pool_state、token_program 等）
 #[derive(Accounts)]
@@ -62,6 +75,7 @@ pub struct SwapAndDeposit<'info> {
     pub user_token1_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
     /// CHECK: Receives the position NFT
+    #[account(address = user.key())]
     pub position_nft_owner: UncheckedAccount<'info>,
 
     /// Unique token mint address, initialize in contract
@@ -158,6 +172,26 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
     liquidity: i128,
     slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
 ) -> Result<()> {
+    // 防钓鱼：仓位 NFT 只能铸给交易签名者本人
+    require_keys_eq!(
+        ctx.accounts.position_nft_owner.key(),
+        ctx.accounts.user.key(),
+        LpDepositError::InvalidPositionNftOwner
+    );
+    // 校验 position_nft_account 必须是 (position_nft_owner, position_nft_mint, Token2022) 的 ATA 地址
+    // 注意：该 ATA 可能尚未初始化（由下游 CPI 创建），因此只校验地址本身，不校验 owner/program。
+    let expected_position_nft_ata = derive_ata_address(
+        &ctx.accounts.position_nft_owner.key(),
+        &ctx.accounts.position_nft_mint.key(),
+        &ctx.accounts.token_program_2022.key(),
+        &ctx.accounts.associated_token_program.key(),
+    );
+    require_keys_eq!(
+        ctx.accounts.position_nft_account.key(),
+        expected_position_nft_ata,
+        LpDepositError::InvalidPositionNftAccount
+    );
+
     // 1. 校验存入的 mint 是否为池子的 token0 或 token1
     require!(
         deposit_mint == ctx.accounts.vault_0_mint.key()
@@ -382,6 +416,18 @@ fn swap_v2<'a, 'b, 'c: 'info, 'info>(
         output_vault_mint: output_mint.to_account_info(),
     };
     let swap_remaining = ctx.remaining_accounts.to_vec();
+    // 轻量校验 remaining_accounts：限制数量并要求 owner 为 Raydium CLMM program（tick array/bitmap 等应满足）
+    require!(
+        swap_remaining.len() <= 32,
+        LpDepositError::InvalidRemainingAccounts
+    );
+    for acc in swap_remaining.iter() {
+        require_keys_eq!(
+            *acc.owner,
+            accounts.raydium_clmm_program.key(),
+            LpDepositError::InvalidRemainingAccounts
+        );
+    }
 
     let cpi_ctx =
         CpiContext::new(cpi_program.clone(), cpi_accounts).with_remaining_accounts(swap_remaining);

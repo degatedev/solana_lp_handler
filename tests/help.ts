@@ -98,7 +98,7 @@ export const getTickArray = (tickLower: number, tickUpper: number, poolKeys: Clm
 
 export const deposit_amount = 111111111;
 export const deposit_token_mint = new PublicKey('So11111111111111111111111111111111111111112');
-export const slippage = 100;
+export const slippage = 5000;
 export const startPrice = 100;
 export const endPrice = 200;
 export const fee_address = new PublicKey('8X35rQUK2u9hfn8rMPwwr6ZSEUhbmfDPEapp589XyoM1');

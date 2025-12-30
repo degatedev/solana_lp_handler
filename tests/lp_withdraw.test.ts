@@ -1,10 +1,12 @@
 import * as anchor from '@coral-xyz/anchor';
 import { BN } from 'bn.js';
 import {
+  AddressLookupTableProgram,
   ComputeBudgetProgram,
   Keypair,
   PublicKey,
   SYSVAR_RENT_PUBKEY,
+  Transaction,
   TransactionMessage,
   VersionedTransaction
 } from '@solana/web3.js';
@@ -66,7 +68,7 @@ describe('lp_withdraw', () => {
     const poolProgramId = new PublicKey(poolKeys.programId);
     const allPosition = await raydium.clmm.getOwnerPositionInfo({ programId: DEVNET_PROGRAM_ID.CLMM_PROGRAM_ID }); // devnet:
     const poolInfo = await getPoolInfo();
-    const position = allPosition.shift();
+    const position = allPosition[1];
     const { tickArrayLower, tickArrayUpper } = getTickArray(
       position.tickLower,
       position.tickUpper,
@@ -123,6 +125,7 @@ describe('lp_withdraw', () => {
       observationState: new PublicKey(poolKeys.observationId),
       userToken0Account: userToken0Account.tokenAccount,
       userToken1Account: userToken1Account.tokenAccount,
+      feeOwner: fee_address,
       positionNftAccount: positionNftAccount.publicKey,
       protocolPosition,
       tickArrayLower,
@@ -155,11 +158,11 @@ describe('lp_withdraw', () => {
     });
 
     let addressLookupTableAccounts = [];
-    if (poolKeys.lookupTableAccount) {
-      const res = await connection.getAddressLookupTable(new PublicKey(poolKeys.lookupTableAccount));
-      if (res.value) {
-        addressLookupTableAccounts.push(res.value);
-      }
+    const res = await connection.getAddressLookupTable(
+      new PublicKey(poolKeys.lookupTableAccount || '7d6JyYAdBWyFNVB47ydVrkydkyZehHAQVYbUrzSsG8wr')
+    );
+    if (res.value) {
+      addressLookupTableAccounts.push(res.value);
     }
     const transaction = new VersionedTransaction(
       new TransactionMessage({
@@ -188,4 +191,54 @@ describe('lp_withdraw', () => {
     });
     console.log('transactionResult', txResult, transactionResult.value.logs);
   }, 5000000);
+
+  test('createAndExtendALT', async () => {
+    const recentSlot = await connection.getSlot('finalized');
+    const [createIx, lookupTableAddress] = AddressLookupTableProgram.createLookupTable({
+      authority: userWallet.publicKey,
+      payer: userWallet.publicKey,
+      recentSlot
+    });
+
+    const extendIx = AddressLookupTableProgram.extendLookupTable({
+      payer: userWallet.publicKey,
+      authority: userWallet.publicKey,
+      lookupTable: lookupTableAddress,
+      addresses: [
+        'DRayAUgENGQBKVaX8owNhgzkEDyoHTGVEGHVJT1E9pfH',
+        'FVu3DGFoAqvG9gqrVBWrncDUF5ytqpvGVQxEKLp55Dvd',
+        'CD4aJtX11cqTCAc83nxSPkkh5JW2yjD6uwHeovjqQ1qu',
+        'FXAXqgjNK6JVzVV2frumKTEuxC8hTEUhVTJTRhMMwLmM',
+        'CyMppkidzzGxvuT6dGx92Uxk9AYSaFJFygdVBe2P1SkV',
+        'HYfoHMdkuGziyB9ySRe7kHkJyXAT3amfgsJr4kbe5cY8',
+        'E5R75rvU4TCV78NZ26vajj7YCdHSD2bMY1NQiQSABk7B',
+        '8X35rQUK2u9hfn8rMPwwr6ZSEUhbmfDPEapp589XyoM1',
+        '3DVbay3sBmXMcoTFPv1CpbBE9nLmrrh3VCmKbeQFPKSH',
+        '6L5KCx3t2aMd7h1B84PBKuLCjXw4xXkKatkAts2NeSDE',
+        '5v2S9uVSF7SB45NNAhK8N8K1ckV4AuKE1ccyVvzzhJvK',
+        'BtzVx4fv1yXVd7XXHYSfPS6xVifWWNtVamAo2trVgC7x',
+        'EsyZsLsH1GMwz7QDmeyXH2U387dL7xQcPQMEULhmDRcW',
+        'SysvarRent111111111111111111111111111111111',
+        '11111111111111111111111111111111',
+        'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
+        'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL',
+        'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb',
+        '96MgzmNvDpGmhuferdtHHZAbGevibNccGM8ojpbqypPi',
+        'FGrU9Vrikb3rpW4g4R81pR25dpH9mQXEqpf3cP4C97S9',
+        'So11111111111111111111111111111111111111112',
+        'USDCoctVLVnvTXBEuP9s8hntucdJokbo17RwHuNXemT',
+        '56D9TcGdMVET4KFgQyauoidubvH6vH88RtScACWKCiR1',
+        'Fb4BUx2QjqKdBL12pBnx8y8HdyKgvbPWdPXYkt6yb9VB',
+        'MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr'
+      ].map((item) => new PublicKey(item))
+    });
+    const tx = new Transaction().add(createIx, extendIx);
+    tx.feePayer = userWallet.publicKey;
+    tx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
+
+    const signed = await userWallet.signTransaction(tx);
+    const sig = await connection.sendRawTransaction(signed.serialize());
+    await connection.confirmTransaction(sig, 'confirmed');
+    console.log('sig', sig);
+  });
 });

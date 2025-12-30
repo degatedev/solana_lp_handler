@@ -213,7 +213,7 @@ describe('lp_deposit', () => {
     // 498PU5rrcysb6vaL77DRRfpiF296in484oPqWcNyZTgBvhaa5djiHXLhXHtYaRp35d6AaeduPpbkNrr7nKYfcHMG
 
     const data = await connection.getParsedTransaction(
-      '5QzZGYCkaB7HkCfomJW9teSSnTTTpNaHfPLrfMmdR3GFMfxXFBCERxE2zbAnhrrQWiUvAvRSxR42Ms74i2Ue4rSG',
+      '2QtAZYxGMbBSLBdnYco1K8Trd3qhr5pBnrKJpFfzS47TWyUhqrTQjkaMfrSrK2zUVG1HZAh7wappkQTYEiwybFfa',
       {
         maxSupportedTransactionVersion: 1,
         commitment: 'confirmed'

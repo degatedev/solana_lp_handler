@@ -6,12 +6,25 @@ use anchor_spl::token_2022::{self, Token2022};
 use anchor_spl::token_interface::{Mint, TokenAccount};
 use raydium_amm_v3::program::AmmV3;
 
-use crate::{utils, DecreaseLiquidityEvent, LpDepositError};
+use crate::{utils, DecreaseLiquidityEvent, LpDepositError, FEE_OWNER};
 use raydium_amm_v3::cpi as clmm_cpi;
 use raydium_amm_v3::cpi::accounts as clmm_accounts;
 use raydium_amm_v3::states::{
     AmmConfig, ObservationState, PersonalPositionState, PoolState, TickArrayState,
 };
+
+fn derive_ata_address(
+    owner: &Pubkey,
+    mint: &Pubkey,
+    token_program: &Pubkey,
+    ata_program: &Pubkey,
+) -> Pubkey {
+    Pubkey::find_program_address(
+        &[owner.as_ref(), token_program.as_ref(), mint.as_ref()],
+        ata_program,
+    )
+    .0
+}
 
 #[derive(Accounts)]
 #[instruction(
@@ -51,6 +64,10 @@ pub struct DecreaseLiquidity<'info> {
       )]
     pub user_token1_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
+    /// 固定 integrator fee 收款人（防止用户把 fee 转回自己绕过抽成）
+    #[account(address = FEE_OWNER)]
+    pub fee_owner: SystemAccount<'info>,
+
     #[account(mut)]
     pub fee_token0_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
@@ -86,11 +103,17 @@ pub struct DecreaseLiquidity<'info> {
     pub memo_program: Program<'info, Memo>,
 
     /// The address that holds pool tokens for token_0
-    #[account(mut)]
+    #[account(
+        mut,
+        constraint = token_vault_0.key() == pool_state.load()?.token_vault_0
+    )]
     pub token_vault_0: Box<InterfaceAccount<'info, TokenAccount>>,
 
     /// The address that holds pool tokens for token_1
-    #[account(mut)]
+    #[account(
+        mut,
+        constraint = token_vault_1.key() == pool_state.load()?.token_vault_1
+    )]
     pub token_vault_1: Box<InterfaceAccount<'info, TokenAccount>>,
 
     /// The mint of token vault 0
@@ -143,26 +166,6 @@ pub struct DecreaseLiquidity<'info> {
     //
 }
 
-fn calculate_fee(
-    pos: &PersonalPositionState,
-    reward_infos: &Vec<raydium_amm_v3::states::RewardInfo>,
-    token_mint_0: &Pubkey,
-    token_mint_1: &Pubkey,
-) -> (u64, u64) {
-    let mut fee0 = pos.token_fees_owed_0;
-    let mut fee1 = pos.token_fees_owed_1;
-    for (i, reward) in pos.reward_infos.iter().enumerate() {
-        let reward_mint = reward_infos[i].token_mint;
-        if reward_mint == *token_mint_0 {
-            fee0 += reward.reward_amount_owed;
-        }
-        if reward_mint == *token_mint_1 {
-            fee1 += reward.reward_amount_owed;
-        }
-    }
-    (fee0, fee1)
-}
-
 pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
     ctx: Context<'a, 'b, 'c, 'info, DecreaseLiquidity<'info>>,
     liquidity: u128,
@@ -182,21 +185,63 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
         LpDepositError::InvalidDepositMint
     );
 
-    let pool_state = ctx.accounts.pool_state.load_mut()?;
-    let reward_infos = pool_state.reward_infos.to_vec();
+    // 预先读取 pool 状态（后续 CPI 可能修改 pool_state），并缓存计算 principal 所需的价格信息
+    let pool_state = ctx.accounts.pool_state.load()?;
+    let tick_current_before = pool_state.tick_current;
+    let sqrt_price_x64_before = pool_state.sqrt_price_x64;
     drop(pool_state);
+
+    // 固定 fee 收款账户：必须是 fee_owner 对应 mint 的 ATA（支持 token / token2022）
+    // vault mint 的账户 owner 就是它的 token program（spl-token 或 token-2022）
+    let vault0_token_program = ctx.accounts.vault_0_mint.to_account_info().owner;
+    let vault1_token_program = ctx.accounts.vault_1_mint.to_account_info().owner;
+    let expected_fee_ata_0 = derive_ata_address(
+        &ctx.accounts.fee_owner.key(),
+        &ctx.accounts.vault_0_mint.key(),
+        vault0_token_program,
+        &ctx.accounts.associated_token_program.key(),
+    );
+    let expected_fee_ata_1 = derive_ata_address(
+        &ctx.accounts.fee_owner.key(),
+        &ctx.accounts.vault_1_mint.key(),
+        vault1_token_program,
+        &ctx.accounts.associated_token_program.key(),
+    );
+    require_keys_eq!(
+        ctx.accounts.fee_token0_account.key(),
+        expected_fee_ata_0,
+        LpDepositError::InvalidFeeTokenAccount
+    );
+    require_keys_eq!(
+        ctx.accounts.fee_token1_account.key(),
+        expected_fee_ata_1,
+        LpDepositError::InvalidFeeTokenAccount
+    );
+    require_keys_eq!(
+        ctx.accounts.fee_token0_account.mint,
+        ctx.accounts.vault_0_mint.key(),
+        LpDepositError::InvalidFeeTokenAccount
+    );
+    require_keys_eq!(
+        ctx.accounts.fee_token1_account.mint,
+        ctx.accounts.vault_1_mint.key(),
+        LpDepositError::InvalidFeeTokenAccount
+    );
+    require_keys_eq!(
+        ctx.accounts.fee_token0_account.owner,
+        ctx.accounts.fee_owner.key(),
+        LpDepositError::InvalidFeeTokenAccount
+    );
+    require_keys_eq!(
+        ctx.accounts.fee_token1_account.owner,
+        ctx.accounts.fee_owner.key(),
+        LpDepositError::InvalidFeeTokenAccount
+    );
     // -----------------------------------
     // BEFORE: 读取用户 Token ATA 余额（用于余额差计算）
     // -----------------------------------
     let user_token0_balance_before = ctx.accounts.user_token0_account.amount;
     let user_token1_balance_before = ctx.accounts.user_token1_account.amount;
-
-    let (fee0_before, fee1_before) = calculate_fee(
-        &ctx.accounts.personal_position,
-        &reward_infos,
-        &ctx.accounts.vault_0_mint.key(),
-        &ctx.accounts.vault_1_mint.key(),
-    );
 
     let cpi_program = ctx.accounts.raydium_clmm_program.to_account_info();
     let accounts = &ctx.accounts;
@@ -222,7 +267,22 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
     // let remaining_account = ctx.remaining_accounts.to_vec();
     let cpi_ctx = CpiContext::new(cpi_program.clone(), cpi_accounts);
     // .with_remaining_accounts(remaining_account);
-
+    // -----------------------------
+    // 关键：用“余额增量 - principal”得到奖励/手续费，再只对奖励/手续费抽成
+    // - claim: liquidity=0 => principal=0 => 全部增量都视为奖励/手续费
+    // - withdraw: liquidity>0 => principal>0 => 奖励/手续费 = 增量 - principal
+    // -----------------------------
+    let (principal_expected_0, principal_expected_1) = if liquidity == 0 {
+        (0u64, 0u64)
+    } else {
+        utils::calculate_principal_amounts_for_liquidity(
+            tick_current_before,
+            sqrt_price_x64_before,
+            ctx.accounts.personal_position.tick_lower_index,
+            ctx.accounts.personal_position.tick_upper_index,
+            liquidity,
+        )?
+    };
     clmm_cpi::decrease_liquidity_v2(cpi_ctx, liquidity, mint_amount_0, mint_amount_1)?;
 
     ctx.accounts.user_token0_account.reload()?;
@@ -231,19 +291,6 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
 
     let user_token0_balance_after = ctx.accounts.user_token0_account.amount;
     let user_token1_balance_after = ctx.accounts.user_token1_account.amount;
-    let (fee0_after, fee1_after) = calculate_fee(
-        &ctx.accounts.personal_position,
-        &reward_infos,
-        &ctx.accounts.vault_0_mint.key(),
-        &ctx.accounts.vault_1_mint.key(),
-    );
-
-    let token_fees_owed_0 = fee0_before
-        .checked_sub(fee0_after)
-        .ok_or(LpDepositError::MathOverflow)?;
-    let token_fees_owed_1 = fee1_before
-        .checked_sub(fee1_after)
-        .ok_or(LpDepositError::MathOverflow)?;
 
     let user_token0_amount = user_token0_balance_after
         .checked_sub(user_token0_balance_before)
@@ -252,148 +299,208 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
         .checked_sub(user_token1_balance_before)
         .ok_or(LpDepositError::MathOverflow)?;
 
+    let reward_gross_0 = user_token0_amount.saturating_sub(principal_expected_0);
+    let reward_gross_1 = user_token1_amount.saturating_sub(principal_expected_1);
+
     if convert_to_usdc {
-        let is_token0 = ctx.accounts.vault_0_mint.key() == swap_to_token_mint;
+        // 兑换到目标币种后再扣手续费（手续费从“最终到手的 reward”中抽取，且用目标币种结算）
+        let target_is_token0 = ctx.accounts.vault_0_mint.key() == swap_to_token_mint;
         msg!(
-            "is_token0: {}, vault_0_mint: {}, swap_to_token_mint: {}",
-            is_token0,
+            "target_is_token0: {}, vault_0_mint: {}, swap_to_token_mint: {}",
+            target_is_token0,
             ctx.accounts.vault_0_mint.key(),
             swap_to_token_mint
         );
 
-        let (swap_amount, fee_amount) = if is_token0 {
-            (user_token1_amount, token_fees_owed_1)
+        // 分两段 swap：先把“奖励部分”换成目标币种（便于精确扣费），再把“本金部分”换成目标币种。
+        // 注意：这里的 swap 输入来自 decrease_liquidity_v2 后的增量（user_token*_amount），不会动到用户原有余额。
+        let (reward_other_in, principal_other_in, reward_target_direct) = if target_is_token0 {
+            // token1 -> token0
+            (
+                reward_gross_1,
+                user_token1_amount.checked_sub(reward_gross_1).unwrap_or(0),
+                reward_gross_0,
+            )
         } else {
-            (user_token0_amount, token_fees_owed_0)
+            // token0 -> token1
+            (
+                reward_gross_0,
+                user_token0_amount.checked_sub(reward_gross_0).unwrap_or(0),
+                reward_gross_1,
+            )
         };
-        let pool_state = ctx.accounts.pool_state.load_mut()?;
-        let sqrt_price_x64 = pool_state.sqrt_price_x64;
-        drop(pool_state);
-        let fee_amount_out =
-            utils::calc_min_amount_out(fee_amount, !is_token0, sqrt_price_x64, slippage_bps);
 
-        let swap_other_amount_threshold =
-            utils::calc_min_amount_out(swap_amount, !is_token0, sqrt_price_x64, slippage_bps);
+        let input_is_token0 = !target_is_token0; // 目标是 token0 => 输入 token1；目标是 token1 => 输入 token0
 
-        msg!(
-            "swap_v2, swap_amount:{}, swap_other_amount_threshold: {}, is_token0: {}",
-            swap_amount,
-            swap_other_amount_threshold,
-            is_token0
-        );
-        msg!(
-            "balance,  user_token0_balance: {},  user_token1_balance: {}",
-            user_token0_balance_after - user_token0_balance_before,
-            user_token1_balance_after - user_token1_balance_before
-        );
-        if swap_amount > 0 {
+        // 记录兑换前目标币种余额，用于计算 reward/principal 兑换的实际输出
+        let target_balance_before_swap = if target_is_token0 {
+            ctx.accounts.user_token0_account.amount
+        } else {
+            ctx.accounts.user_token1_account.amount
+        };
+
+        // 1) 先换 reward（如果有）
+        let mut reward_out_in_target: u64 = 0;
+        if reward_other_in > 0 {
+            let swap_other_amount_threshold = utils::calc_min_amount_out(
+                reward_other_in,
+                input_is_token0,
+                sqrt_price_x64_before,
+                slippage_bps,
+            )?;
             swap_v2(
                 &ctx,
-                swap_amount,
+                reward_other_in,
                 swap_other_amount_threshold,
                 0,
-                !is_token0,
+                input_is_token0,
             )?;
+            ctx.accounts.user_token0_account.reload()?;
+            ctx.accounts.user_token1_account.reload()?;
+            let target_balance_after_reward_swap = if target_is_token0 {
+                ctx.accounts.user_token0_account.amount
+            } else {
+                ctx.accounts.user_token1_account.amount
+            };
+            reward_out_in_target = target_balance_after_reward_swap
+                .checked_sub(target_balance_before_swap)
+                .ok_or(LpDepositError::MathOverflow)?;
         }
 
-        ctx.accounts.user_token0_account.reload()?;
-        ctx.accounts.user_token1_account.reload()?;
-
-        msg!(
-            "swap_v2_balance,  user_token0_balance: {},  user_token1_balance: {}",
-            ctx.accounts.user_token0_account.amount - user_token0_balance_before,
-            ctx.accounts.user_token1_account.amount - user_token1_balance_before
-        );
-
-        let (reward_amount, principal_amount) = if is_token0 {
-            let fee = token_fees_owed_0
-                .checked_add(fee_amount_out)
-                .ok_or(LpDepositError::MathOverflow)?;
-            let principal = ctx
-                .accounts
-                .user_token0_account
-                .amount
-                .checked_sub(user_token0_balance_before)
-                .ok_or(LpDepositError::MathOverflow)?
-                .checked_sub(fee)
-                .ok_or(LpDepositError::MathOverflow)?;
-            (fee, principal)
-        } else {
-            let fee = token_fees_owed_1
-                .checked_add(fee_amount_out)
-                .ok_or(LpDepositError::MathOverflow)?;
-            let principal = ctx
-                .accounts
-                .user_token1_account
-                .amount
-                .checked_sub(user_token1_balance_before)
-                .ok_or(LpDepositError::MathOverflow)?
-                .checked_sub(fee)
-                .ok_or(LpDepositError::MathOverflow)?;
-            (fee, principal)
-        };
-
-        let integrator_fee = reward_amount
-            .checked_mul((fee_percent) as u64)
+        // 2) reward 已全部在目标币种：计算并扣 fee（只对 reward 抽成）
+        let reward_total_in_target = reward_target_direct
+            .checked_add(reward_out_in_target)
+            .ok_or(LpDepositError::MathOverflow)?;
+        let integrator_fee_target = reward_total_in_target
+            .checked_mul(fee_percent as u64)
             .ok_or(LpDepositError::MathOverflow)?
-            .checked_div(10000)
+            .checked_div(10_000)
             .ok_or(LpDepositError::MathOverflow)?;
 
         transfer_fee(
             &ctx.accounts.user,
-            if is_token0 {
+            if target_is_token0 {
                 &ctx.accounts.user_token0_account
             } else {
                 &ctx.accounts.user_token1_account
             },
-            if is_token0 {
+            if target_is_token0 {
                 &ctx.accounts.fee_token0_account
             } else {
                 &ctx.accounts.fee_token1_account
             },
-            if is_token0 {
+            if target_is_token0 {
                 Some(&ctx.accounts.vault_0_mint)
             } else {
                 Some(&ctx.accounts.vault_1_mint)
             },
             &ctx.accounts.token_program,
             Some(&ctx.accounts.token_program_2022),
-            integrator_fee,
+            integrator_fee_target,
         )?;
-        emit!(DecreaseLiquidityEvent {
-            user: ctx.accounts.user.key(),
-            pool: ctx.accounts.pool_state.key(),
-            token0_mint: ctx.accounts.vault_0_mint.key(),
-            token1_mint: ctx.accounts.vault_1_mint.key(),
-            principal_amount_0: if is_token0 { principal_amount } else { 0 },
-            principal_amount_1: if is_token0 { 0 } else { principal_amount },
-            integrator_fee_0: if is_token0 { integrator_fee } else { 0 },
-            integrator_fee_1: if is_token0 { 0 } else { integrator_fee },
-            reward_amount_0: if is_token0 {
-                reward_amount - integrator_fee
+
+        // 3) 再换本金（如果有）。为避免把已换出的 reward 再算一遍，这里只换剩余的 other token 增量。
+        // 重新读取目标币种余额，用于计算本金兑换输出
+        ctx.accounts.user_token0_account.reload()?;
+        ctx.accounts.user_token1_account.reload()?;
+        let target_balance_before_principal_swap = if target_is_token0 {
+            ctx.accounts.user_token0_account.amount
+        } else {
+            ctx.accounts.user_token1_account.amount
+        };
+        let mut principal_out_in_target: u64 = 0;
+        if principal_other_in > 0 {
+            // 此处用 decrease 前缓存的 sqrt_price 作阈值近似（可进一步改为读取当前 pool_state 的 sqrt_price_x64）
+            let swap_other_amount_threshold = utils::calc_min_amount_out(
+                principal_other_in,
+                input_is_token0,
+                sqrt_price_x64_before,
+                slippage_bps,
+            )?;
+            swap_v2(
+                &ctx,
+                principal_other_in,
+                swap_other_amount_threshold,
+                0,
+                input_is_token0,
+            )?;
+            ctx.accounts.user_token0_account.reload()?;
+            ctx.accounts.user_token1_account.reload()?;
+            let target_balance_after_principal_swap = if target_is_token0 {
+                ctx.accounts.user_token0_account.amount
             } else {
-                0
-            },
-            reward_amount_1: if is_token0 {
-                0
-            } else {
-                reward_amount - integrator_fee
-            },
-        });
+                ctx.accounts.user_token1_account.amount
+            };
+            principal_out_in_target = target_balance_after_principal_swap
+                .checked_sub(target_balance_before_principal_swap)
+                .ok_or(LpDepositError::MathOverflow)?;
+        }
+
+        msg!(
+            "swap_v2, swap_amount:{}, swap_other_amount_threshold: {}, is_token0: {}",
+            reward_other_in + principal_other_in,
+            0,
+            input_is_token0
+        );
+        msg!(
+            "balance,  user_token0_balance: {},  user_token1_balance: {}",
+            user_token0_balance_after - user_token0_balance_before,
+            user_token1_balance_after - user_token1_balance_before
+        );
+
+        // 事件按“兑换后”口径输出：只在目标币种上体现 principal/reward/fee，其它币种为 0
+        if target_is_token0 {
+            let principal_amount_0 = principal_expected_0
+                .checked_add(principal_out_in_target)
+                .ok_or(LpDepositError::MathOverflow)?;
+            let reward_amount_0 = reward_total_in_target
+                .checked_sub(integrator_fee_target)
+                .ok_or(LpDepositError::MathOverflow)?;
+            emit!(DecreaseLiquidityEvent {
+                user: ctx.accounts.user.key(),
+                pool: ctx.accounts.pool_state.key(),
+                token0_mint: ctx.accounts.vault_0_mint.key(),
+                token1_mint: ctx.accounts.vault_1_mint.key(),
+                principal_amount_0,
+                principal_amount_1: 0,
+                integrator_fee_0: integrator_fee_target,
+                integrator_fee_1: 0,
+                reward_amount_0,
+                reward_amount_1: 0,
+            });
+        } else {
+            let principal_amount_1 = principal_expected_1
+                .checked_add(principal_out_in_target)
+                .ok_or(LpDepositError::MathOverflow)?;
+            let reward_amount_1 = reward_total_in_target
+                .checked_sub(integrator_fee_target)
+                .ok_or(LpDepositError::MathOverflow)?;
+            emit!(DecreaseLiquidityEvent {
+                user: ctx.accounts.user.key(),
+                pool: ctx.accounts.pool_state.key(),
+                token0_mint: ctx.accounts.vault_0_mint.key(),
+                token1_mint: ctx.accounts.vault_1_mint.key(),
+                principal_amount_0: 0,
+                principal_amount_1,
+                integrator_fee_0: 0,
+                integrator_fee_1: integrator_fee_target,
+                reward_amount_0: 0,
+                reward_amount_1,
+            });
+        }
     } else {
-        let integrator_fee_0 = token_fees_owed_0
-            .checked_mul((fee_percent) as u64)
+        // 不换币：直接对两种 token 的 reward 部分分别抽成
+        let integrator_fee_0 = reward_gross_0
+            .checked_mul(fee_percent as u64)
             .ok_or(LpDepositError::MathOverflow)?
-            .checked_div(10000)
+            .checked_div(10_000)
+            .ok_or(LpDepositError::MathOverflow)?;
+        let integrator_fee_1 = reward_gross_1
+            .checked_mul(fee_percent as u64)
+            .ok_or(LpDepositError::MathOverflow)?
+            .checked_div(10_000)
             .ok_or(LpDepositError::MathOverflow)?;
 
-        let integrator_fee_1 = token_fees_owed_1
-            .checked_mul((fee_percent) as u64)
-            .ok_or(LpDepositError::MathOverflow)?
-            .checked_div(10000)
-            .ok_or(LpDepositError::MathOverflow)?;
-
-        // 将用户应得费用的一部分转入集成方费用账户
         transfer_fee(
             &ctx.accounts.user,
             &ctx.accounts.user_token0_account,
@@ -403,7 +510,6 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             Some(&ctx.accounts.token_program_2022),
             integrator_fee_0,
         )?;
-
         transfer_fee(
             &ctx.accounts.user,
             &ctx.accounts.user_token1_account,
@@ -413,19 +519,15 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             Some(&ctx.accounts.token_program_2022),
             integrator_fee_1,
         )?;
-        let principal_amount_0 = user_token0_amount
-            .checked_sub(token_fees_owed_0)
-            .ok_or(LpDepositError::MathOverflow)?;
-        let principal_amount_1 = user_token1_amount
-            .checked_sub(token_fees_owed_1)
-            .ok_or(LpDepositError::MathOverflow)?;
-        let reward_amount_0 = token_fees_owed_0
+
+        let principal_amount_0 = principal_expected_0;
+        let principal_amount_1 = principal_expected_1;
+        let reward_amount_0 = reward_gross_0
             .checked_sub(integrator_fee_0)
             .ok_or(LpDepositError::MathOverflow)?;
-        let reward_amount_1 = token_fees_owed_1
+        let reward_amount_1 = reward_gross_1
             .checked_sub(integrator_fee_1)
             .ok_or(LpDepositError::MathOverflow)?;
-
         emit!(DecreaseLiquidityEvent {
             user: ctx.accounts.user.key(),
             pool: ctx.accounts.pool_state.key(),
@@ -491,6 +593,18 @@ fn swap_v2<'a, 'b, 'c: 'info, 'info>(
         output_vault_mint: output_mint.to_account_info(),
     };
     let swap_remaining = ctx.remaining_accounts.to_vec();
+    // 轻量校验 remaining_accounts：限制数量并要求 owner 为 Raydium CLMM program（tick array/bitmap 等应满足）
+    require!(
+        swap_remaining.len() <= 32,
+        LpDepositError::InvalidRemainingAccounts
+    );
+    for acc in swap_remaining.iter() {
+        require_keys_eq!(
+            *acc.owner,
+            accounts.raydium_clmm_program.key(),
+            LpDepositError::InvalidRemainingAccounts
+        );
+    }
 
     let cpi_ctx =
         CpiContext::new(cpi_program.clone(), cpi_accounts).with_remaining_accounts(swap_remaining);

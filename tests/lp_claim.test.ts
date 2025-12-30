@@ -67,6 +67,7 @@ describe('lp_claim', () => {
     const allPosition = await raydium.clmm.getOwnerPositionInfo({ programId: DEVNET_PROGRAM_ID.CLMM_PROGRAM_ID }); // devnet:
     const poolInfo = await getPoolInfo();
     const position = allPosition.shift();
+    console.log('position', allPosition.length, position.nftMint.toBase58());
     const { tickArrayLower, tickArrayUpper } = getTickArray(
       position.tickLower,
       position.tickUpper,
@@ -123,6 +124,7 @@ describe('lp_claim', () => {
       observationState: new PublicKey(poolKeys.observationId),
       userToken0Account: userToken0Account.tokenAccount,
       userToken1Account: userToken1Account.tokenAccount,
+      feeOwner: fee_address,
       positionNftAccount: positionNftAccount.publicKey,
       protocolPosition,
       tickArrayLower,

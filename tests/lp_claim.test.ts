@@ -29,13 +29,19 @@ import { ASSOCIATED_TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from '@solana/spl-
 import { solveZapSingleSidedCLMM } from './utils';
 import {
   connection,
+  deposit_amount,
+  deposit_token_mint,
+  fee_address,
+  fee_percent,
   getPoolInfo,
   getPoolKeys,
   getRaydium,
   getTickArray,
   getTickLowerAndUpper,
   getTokenAta,
+  pool_address,
   program,
+  slippage,
   user,
   userWallet
 } from './help';
@@ -44,12 +50,6 @@ import {
 // 如果需要覆盖，可以在这里设置：
 // process.env.ANCHOR_PROVIDER_URL = "your-custom-rpc-url";
 // process.env.ANCHOR_WALLET = "your-wallet-path";
-
-const pool_address = new PublicKey('FXAXqgjNK6JVzVV2frumKTEuxC8hTEUhVTJTRhMMwLmM');
-const deposit_token_mint = new PublicKey('So11111111111111111111111111111111111111112');
-const fee_address = new PublicKey('8X35rQUK2u9hfn8rMPwwr6ZSEUhbmfDPEapp589XyoM1');
-const slippage = 100;
-const fee_percent = 1200;
 
 const nft_mint = '';
 describe('lp_claim', () => {
@@ -95,7 +95,7 @@ describe('lp_claim', () => {
     const swapAmountOut = await PoolUtils.computeAmountOutFormat({
       poolInfo: data.computePoolInfo,
       tickArrayCache: tickArrayCache[pool_address.toBase58()],
-      amountIn: new BN(100000000000),
+      amountIn: new BN(deposit_amount),
       tokenOut: poolInfo[deposit_token_mint.equals(new PublicKey(poolKeys.mintA.address)) ? 'mintA' : 'mintB'],
       slippage: 0.01,
       epochInfo: await raydium.fetchEpochInfo()
@@ -123,7 +123,6 @@ describe('lp_claim', () => {
       observationState: new PublicKey(poolKeys.observationId),
       userToken0Account: userToken0Account.tokenAccount,
       userToken1Account: userToken1Account.tokenAccount,
-      positionNftOwner: user,
       positionNftAccount: positionNftAccount.publicKey,
       protocolPosition,
       tickArrayLower,
@@ -148,13 +147,6 @@ describe('lp_claim', () => {
       .accountsStrict(accounts)
       .remainingAccounts(remainingAccounts)
       .instruction();
-    const closeInsInfo = await ClmmInstrument.closePositionInstructions({
-      poolInfo,
-      poolKeys,
-      ownerInfo: { wallet: user },
-      ownerPosition: position,
-      nft2022: true
-    });
 
     let addressLookupTableAccounts = [];
     if (poolKeys.lookupTableAccount) {
@@ -174,8 +166,7 @@ describe('lp_claim', () => {
           ComputeBudgetProgram.setComputeUnitPrice({
             microLamports: 1000
           }),
-          instruction,
-          ...closeInsInfo.instructions
+          instruction
         ]
       }).compileToV0Message(addressLookupTableAccounts)
     );

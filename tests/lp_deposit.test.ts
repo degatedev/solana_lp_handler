@@ -27,6 +27,9 @@ import { ASSOCIATED_TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } 
 import { solveZapSingleSidedCLMM } from './utils';
 import {
   connection,
+  deposit_amount,
+  deposit_token_mint,
+  endPrice,
   getPoolInfo,
   getPoolKeys,
   getRaydium,
@@ -35,6 +38,8 @@ import {
   getTokenAta,
   pool_address,
   program,
+  slippage,
+  startPrice,
   user,
   userWallet
 } from './help';
@@ -45,12 +50,6 @@ import amm_v3 from './amm_v3.json';
 // 如果需要覆盖，可以在这里设置：
 // process.env.ANCHOR_PROVIDER_URL = "your-custom-rpc-url";
 // process.env.ANCHOR_WALLET = "your-wallet-path";
-
-const deposit_token_mint = new PublicKey('So11111111111111111111111111111111111111112');
-const deposit_amount = 111111111;
-const slippage = 100;
-let startPrice = 100;
-let endPrice = 200;
 
 describe('lp_deposit', () => {
   // Configure the client to use the local cluster.
@@ -214,7 +213,7 @@ describe('lp_deposit', () => {
     // 498PU5rrcysb6vaL77DRRfpiF296in484oPqWcNyZTgBvhaa5djiHXLhXHtYaRp35d6AaeduPpbkNrr7nKYfcHMG
 
     const data = await connection.getParsedTransaction(
-      '498PU5rrcysb6vaL77DRRfpiF296in484oPqWcNyZTgBvhaa5djiHXLhXHtYaRp35d6AaeduPpbkNrr7nKYfcHMG',
+      '5QzZGYCkaB7HkCfomJW9teSSnTTTpNaHfPLrfMmdR3GFMfxXFBCERxE2zbAnhrrQWiUvAvRSxR42Ms74i2Ue4rSG',
       {
         maxSupportedTransactionVersion: 1,
         commitment: 'confirmed'

@@ -105,9 +105,6 @@ pub struct DecreaseLiquidity<'info> {
     )]
     pub vault_1_mint: Box<InterfaceAccount<'info, Mint>>,
 
-    /// CHECK: Receives the position NFT
-    pub position_nft_owner: UncheckedAccount<'info>,
-
     /// Unique token mint address, initialize in contract
 
     /// CHECK: ATA address where position NFT will be minted, initialize in contract
@@ -118,7 +115,7 @@ pub struct DecreaseLiquidity<'info> {
     pub protocol_position: UncheckedAccount<'info>,
 
     /// CHECK: Personal position state account, validated by Raydium CLMM program
-    #[account(mut)]
+    #[account(mut, constraint = personal_position.pool_id == pool_state.key())]
     pub personal_position: Box<Account<'info, PersonalPositionState>>,
 
     /// Stores init state for the lower tick

@@ -290,6 +290,12 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
         .checked_sub(user_token1_balance_before)
         .ok_or(LpDepositError::MathOverflow)?;
 
+    // 所有情况：如果本次操作没有带来任何余额变化（两边增量都为 0），直接失败
+    require!(
+        user_token0_amount > 0 || user_token1_amount > 0,
+        LpDepositError::NoBalanceChange
+    );
+
     let reward_gross_0 = user_token0_amount.saturating_sub(principal_expected_0);
     let reward_gross_1 = user_token1_amount.saturating_sub(principal_expected_1);
 

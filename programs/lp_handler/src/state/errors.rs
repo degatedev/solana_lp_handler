@@ -31,4 +31,7 @@ pub enum LpDepositError {
 
     #[msg("Invalid tick range")]
     InvalidTickRange,
+
+    #[msg("No claimable rewards or redeemable principal")]
+    NoBalanceChange,
 }

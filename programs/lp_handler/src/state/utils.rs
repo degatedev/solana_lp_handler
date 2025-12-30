@@ -103,3 +103,16 @@ pub fn calculate_principal_amounts_for_liquidity(
     )?;
     Ok((amount_0, amount_1))
 }
+
+pub fn derive_ata_address(
+    owner: &Pubkey,
+    mint: &Pubkey,
+    token_program: &Pubkey,
+    ata_program: &Pubkey,
+) -> Pubkey {
+    Pubkey::find_program_address(
+        &[owner.as_ref(), token_program.as_ref(), mint.as_ref()],
+        ata_program,
+    )
+    .0
+}

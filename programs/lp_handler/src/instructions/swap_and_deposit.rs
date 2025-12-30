@@ -11,19 +11,6 @@ use anchor_spl::token_interface::{Mint, Token2022, TokenAccount};
 use raydium_amm_v3::program::AmmV3;
 use raydium_amm_v3::states::{AmmConfig, ObservationState, PoolState, TickArrayState};
 
-fn derive_ata_address(
-    owner: &Pubkey,
-    mint: &Pubkey,
-    token_program: &Pubkey,
-    ata_program: &Pubkey,
-) -> Pubkey {
-    Pubkey::find_program_address(
-        &[owner.as_ref(), token_program.as_ref(), mint.as_ref()],
-        ata_program,
-    )
-    .0
-}
-
 /// swap_and_deposit 所需的所有账户
 /// 包含 swap_v2 和 open_position_v2 的全部账户（有些可以复用，比如 pool_state、token_program 等）
 #[derive(Accounts)]
@@ -189,7 +176,7 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
     );
     // 校验 position_nft_account 必须是 (position_nft_owner, position_nft_mint, Token2022) 的 ATA 地址
     // 注意：该 ATA 可能尚未初始化（由下游 CPI 创建），因此只校验地址本身，不校验 owner/program。
-    let expected_position_nft_ata = derive_ata_address(
+    let expected_position_nft_ata = utils::derive_ata_address(
         &ctx.accounts.position_nft_owner.key(),
         &ctx.accounts.position_nft_mint.key(),
         &ctx.accounts.token_program_2022.key(),

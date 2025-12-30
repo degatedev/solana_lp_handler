@@ -13,19 +13,6 @@ use raydium_amm_v3::states::{
     AmmConfig, ObservationState, PersonalPositionState, PoolState, TickArrayState,
 };
 
-fn derive_ata_address(
-    owner: &Pubkey,
-    mint: &Pubkey,
-    token_program: &Pubkey,
-    ata_program: &Pubkey,
-) -> Pubkey {
-    Pubkey::find_program_address(
-        &[owner.as_ref(), token_program.as_ref(), mint.as_ref()],
-        ata_program,
-    )
-    .0
-}
-
 #[derive(Accounts)]
 #[instruction(
   liquidity:u128,
@@ -199,13 +186,13 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
     // vault mint 的账户 owner 就是它的 token program（spl-token 或 token-2022）
     let vault0_token_program = ctx.accounts.vault_0_mint.to_account_info().owner;
     let vault1_token_program = ctx.accounts.vault_1_mint.to_account_info().owner;
-    let expected_fee_ata_0 = derive_ata_address(
+    let expected_fee_ata_0 = utils::derive_ata_address(
         &ctx.accounts.fee_owner.key(),
         &ctx.accounts.vault_0_mint.key(),
         vault0_token_program,
         &ctx.accounts.associated_token_program.key(),
     );
-    let expected_fee_ata_1 = derive_ata_address(
+    let expected_fee_ata_1 = utils::derive_ata_address(
         &ctx.accounts.fee_owner.key(),
         &ctx.accounts.vault_1_mint.key(),
         vault1_token_program,

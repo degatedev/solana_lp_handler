@@ -64,7 +64,6 @@ describe('lp_deposit', () => {
 
   it('lp_deposit test', async () => {
     // Add your test here.
-    console.log(user);
     const { tickLower, tickUpper } = getTickLowerAndUpper(poolKeys, startPrice, endPrice);
     const poolProgramId = new PublicKey(poolKeys.programId);
 
@@ -213,7 +212,7 @@ describe('lp_deposit', () => {
     // 498PU5rrcysb6vaL77DRRfpiF296in484oPqWcNyZTgBvhaa5djiHXLhXHtYaRp35d6AaeduPpbkNrr7nKYfcHMG
 
     const data = await connection.getParsedTransaction(
-      '2QtAZYxGMbBSLBdnYco1K8Trd3qhr5pBnrKJpFfzS47TWyUhqrTQjkaMfrSrK2zUVG1HZAh7wappkQTYEiwybFfa',
+      '4KLMZBgJJDoXas5SH55rnNjbgb2SuwzzrSAKBrt3TC1jFC31cPKhi4r8Q4RaAqpNmXyGesGEEZMhrgBqZ1wCvYNw',
       {
         maxSupportedTransactionVersion: 1,
         commitment: 'confirmed'

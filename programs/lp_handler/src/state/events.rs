@@ -3,6 +3,8 @@ use anchor_lang::prelude::*;
 /// Swap 执行事件
 #[event]
 pub struct SwapExecutedEvent {
+    /// Unix 时间戳（秒）
+    pub timestamp: i64,
     /// 执行 swap 的用户
     pub user: Pubkey,
     /// Pool 地址
@@ -26,6 +28,8 @@ pub struct SwapExecutedEvent {
 /// 流动性添加事件
 #[event]
 pub struct IncreaseLiquidityEvent {
+    /// Unix 时间戳（秒）
+    pub timestamp: i64,
     /// 添加流动性的用户
     pub user: Pubkey,
     /// Pool 地址
@@ -50,6 +54,8 @@ pub struct IncreaseLiquidityEvent {
 
 #[event]
 pub struct DecreaseLiquidityEvent {
+    /// Unix 时间戳（秒）
+    pub timestamp: i64,
     /// 减少流动性的用户
     pub user: Pubkey,
     /// Pool 地址

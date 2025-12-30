@@ -167,6 +167,7 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
     fee_percent: u16,
     convert_to_usdc: bool,
 ) -> Result<()> {
+    let timestamp = Clock::get()?.unix_timestamp;
     // 校验手续费比例，最大 100%（10000 bps）
     require!(fee_percent <= 10_000, LpDepositError::InvalidFeePercent);
     require!(slippage_bps <= 10_000, LpDepositError::InvalidSlippage);
@@ -454,6 +455,7 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
                 .checked_sub(integrator_fee_target)
                 .ok_or(LpDepositError::MathOverflow)?;
             emit!(DecreaseLiquidityEvent {
+                timestamp,
                 user: ctx.accounts.user.key(),
                 pool: ctx.accounts.pool_state.key(),
                 token0_mint: ctx.accounts.vault_0_mint.key(),
@@ -473,6 +475,7 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
                 .checked_sub(integrator_fee_target)
                 .ok_or(LpDepositError::MathOverflow)?;
             emit!(DecreaseLiquidityEvent {
+                timestamp,
                 user: ctx.accounts.user.key(),
                 pool: ctx.accounts.pool_state.key(),
                 token0_mint: ctx.accounts.vault_0_mint.key(),
@@ -526,6 +529,7 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             .checked_sub(integrator_fee_1)
             .ok_or(LpDepositError::MathOverflow)?;
         emit!(DecreaseLiquidityEvent {
+            timestamp,
             user: ctx.accounts.user.key(),
             pool: ctx.accounts.pool_state.key(),
             token0_mint: ctx.accounts.vault_0_mint.key(),

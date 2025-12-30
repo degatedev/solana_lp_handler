@@ -163,6 +163,7 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
     liquidity: i128,
     slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
 ) -> Result<()> {
+    let timestamp = Clock::get()?.unix_timestamp;
     // 防钓鱼：仓位 NFT 只能铸给交易签名者本人
     require_keys_eq!(
         ctx.accounts.position_nft_owner.key(),
@@ -228,23 +229,11 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
     // 5. 执行 swap（如果需要）
     if swap_amount_in > 0 {
         // 计算最小输出（滑点保护）
-        let mut min_amount_out = swap_amount_out
-            .checked_mul((10000 - slippage_bps) as u64)
-            .ok_or(LpDepositError::MathOverflow)?
-            .checked_div(10000)
-            .ok_or(LpDepositError::MathOverflow)?;
+        let mut min_amount_out = utils::apply_slippage_bps_floor(swap_amount_out, slippage_bps)?;
         swap_amount_min = swap_amount_in;
         if swap_amount_in != deposit_amount {
-            swap_amount_min = swap_amount_in
-                .checked_mul((10000 - slippage_bps) as u64)
-                .ok_or(LpDepositError::MathOverflow)?
-                .checked_div(10000)
-                .ok_or(LpDepositError::MathOverflow)?;
-            min_amount_out = swap_amount_out
-                .checked_mul((10000 - slippage_bps) as u64)
-                .ok_or(LpDepositError::MathOverflow)?
-                .checked_div(10000)
-                .ok_or(LpDepositError::MathOverflow)?;
+            swap_amount_min = utils::apply_slippage_bps_floor(swap_amount_in, slippage_bps)?;
+            min_amount_out = utils::apply_slippage_bps_floor(swap_amount_out, slippage_bps)?;
         }
         msg!(
             "Swap params: swap_amount={},min_amount_out={},swap_amount_out={}",
@@ -272,6 +261,7 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
         };
         // 发出 Swap 事件
         emit!(SwapExecutedEvent {
+            timestamp,
             user: ctx.accounts.user.key(),
             pool: ctx.accounts.pool_state.key(),
             amount_in: swap_amount_min,
@@ -314,13 +304,15 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
         TickArrayState::get_array_start_index(tick_lower_index, tick_spacing as u16);
     let tick_array_upper_start_index =
         TickArrayState::get_array_start_index(tick_upper_index, tick_spacing as u16);
-    let mut base_flag = if is_token0 { Some(false) } else { Some(true) };
-    if amount_0_max == 0 {
-        base_flag = Some(false);
-    }
-    if amount_1_max == 0 {
-        base_flag = Some(true);
-    }
+    let base_flag = if amount_0_max == 0 {
+        Some(false)
+    } else if amount_1_max == 0 {
+        Some(true)
+    } else if is_token0 {
+        Some(false)
+    } else {
+        Some(true)
+    };
 
     msg!(
         "open_position for LP: amount_0_max={}, amount_1_max={} (deposit_amount={}, swap_amount_in={}, swap_amount_out={}, base_flag={})",
@@ -352,6 +344,7 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
 
     // 发出流动性添加事件
     emit!(IncreaseLiquidityEvent {
+        timestamp,
         user: ctx.accounts.user.key(),
         pool: ctx.accounts.pool_state.key(),
         position_nft_mint: ctx.accounts.position_nft_mint.key(),

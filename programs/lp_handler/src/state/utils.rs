@@ -46,6 +46,23 @@ pub fn calc_min_amount_out(
     Ok(out.as_u64())
 }
 
+/// 对给定 `amount` 应用滑点折扣（bps），返回 `amount * (1 - slippage)` 的结果。
+/// 说明：
+/// - 使用 `u128` 计算避免 `u64` 乘法溢出
+/// - 采用向下取整（floor），保持“min_out 不会被抬高导致无谓失败”的语义
+pub fn apply_slippage_bps_floor(amount: u64, slippage_bps: u16) -> Result<u64> {
+    require!(slippage_bps <= 10_000, LpDepositError::InvalidSlippage);
+    let factor = 10_000u128
+        .checked_sub(slippage_bps as u128)
+        .ok_or(LpDepositError::MathOverflow)?;
+    let out = (amount as u128)
+        .checked_mul(factor)
+        .ok_or(LpDepositError::MathOverflow)?
+        .checked_div(10_000u128)
+        .ok_or(LpDepositError::MathOverflow)?;
+    u64::try_from(out).map_err(|_| LpDepositError::MathOverflow.into())
+}
+
 /// 使用 Raydium liquidity_math 计算最优 swap 数量
 pub fn calculate_optimal_swap_amount(
     deposit_amount: u64,

@@ -151,11 +151,11 @@ describe('lp_claim', () => {
       .instruction();
 
     let addressLookupTableAccounts = [];
-    if (poolKeys.lookupTableAccount) {
-      const res = await connection.getAddressLookupTable(new PublicKey(poolKeys.lookupTableAccount));
-      if (res.value) {
-        addressLookupTableAccounts.push(res.value);
-      }
+    const res = await connection.getAddressLookupTable(
+      new PublicKey(poolKeys.lookupTableAccount || '7d6JyYAdBWyFNVB47ydVrkydkyZehHAQVYbUrzSsG8wr')
+    );
+    if (res.value) {
+      addressLookupTableAccounts.push(res.value);
     }
     const transaction = new VersionedTransaction(
       new TransactionMessage({

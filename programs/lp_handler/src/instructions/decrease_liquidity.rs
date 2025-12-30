@@ -40,6 +40,7 @@ pub struct DecreaseLiquidity<'info> {
     // ========== 公共账户 ==========
     /// Raydium CLMM program (主网: CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK)
     /// CHECK: 前端传入 Raydium CLMM programId
+    #[account(address = raydium_amm_v3::ID)]
     pub raydium_clmm_program: Program<'info, AmmV3>,
 
     /// 支付者 / 签名者
@@ -78,7 +79,10 @@ pub struct DecreaseLiquidity<'info> {
     pub amm_config: Box<Account<'info, AmmConfig>>,
 
     /// Pool 状态账户（swap 和 open_position 都需要）
-    #[account(mut)]
+    #[account(
+        mut,
+        constraint = pool_state.load()?.amm_config == amm_config.key()
+    )]
     pub pool_state: AccountLoader<'info, PoolState>,
 
     /// Observation 状态（swap 需要）

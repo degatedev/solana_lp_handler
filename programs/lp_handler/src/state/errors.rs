@@ -28,4 +28,7 @@ pub enum LpDepositError {
 
     #[msg("Invalid sqrt price")]
     InvalidSqrtPrice,
+
+    #[msg("Invalid tick range")]
+    InvalidTickRange,
 }

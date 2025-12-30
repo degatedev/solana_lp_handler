@@ -72,10 +72,14 @@ pub fn calculate_optimal_swap_amount(
     if is_token0 {
         // 用户有 token0，需要换一部分成 token1
         // swap_amount = deposit_amount - amount_0_needed
-        let swap_amount = (deposit_amount).checked_sub(amount_0_needed).unwrap_or(0);
+        let swap_amount = deposit_amount
+            .checked_sub(amount_0_needed)
+            .ok_or(LpDepositError::MathOverflow)?;
         return Ok((swap_amount, amount_1_needed));
     } else {
-        let swap_amount = (deposit_amount).checked_sub(amount_1_needed).unwrap_or(0);
+        let swap_amount = deposit_amount
+            .checked_sub(amount_1_needed)
+            .ok_or(LpDepositError::MathOverflow)?;
         return Ok((swap_amount, amount_0_needed));
     }
 }

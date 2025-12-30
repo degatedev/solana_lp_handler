@@ -39,6 +39,7 @@ pub struct SwapAndDeposit<'info> {
     // ========== 公共账户 ==========
     /// Raydium CLMM program (主网: CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK)
     /// CHECK: 前端传入 Raydium CLMM programId
+    #[account(address = raydium_amm_v3::ID)]
     pub raydium_clmm_program: Program<'info, AmmV3>,
 
     /// 支付者 / 签名者
@@ -49,7 +50,10 @@ pub struct SwapAndDeposit<'info> {
     pub amm_config: Box<Account<'info, AmmConfig>>,
 
     /// Pool 状态账户（swap 和 open_position 都需要）
-    #[account(mut)]
+    #[account(
+        mut,
+        constraint = pool_state.load()?.amm_config == amm_config.key()
+    )]
     pub pool_state: AccountLoader<'info, PoolState>,
 
     /// Observation 状态（swap 需要）
@@ -177,6 +181,11 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
         ctx.accounts.position_nft_owner.key(),
         ctx.accounts.user.key(),
         LpDepositError::InvalidPositionNftOwner
+    );
+    // tick 区间必须合法
+    require!(
+        tick_lower_index < tick_upper_index,
+        LpDepositError::InvalidTickRange
     );
     // 校验 position_nft_account 必须是 (position_nft_owner, position_nft_mint, Token2022) 的 ATA 地址
     // 注意：该 ATA 可能尚未初始化（由下游 CPI 创建），因此只校验地址本身，不校验 owner/program。

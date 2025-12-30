@@ -23,6 +23,9 @@ pub enum LpDepositError {
     #[msg("Invalid fee token account")]
     InvalidFeeTokenAccount,
 
+    #[msg("Invalid fee owner")]
+    InvalidFeeOwner,
+
     #[msg("Invalid remaining accounts")]
     InvalidRemainingAccounts,
 

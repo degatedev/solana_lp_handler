@@ -68,7 +68,7 @@ describe('lp_withdraw', () => {
     const poolProgramId = new PublicKey(poolKeys.programId);
     const allPosition = await raydium.clmm.getOwnerPositionInfo({ programId: DEVNET_PROGRAM_ID.CLMM_PROGRAM_ID }); // devnet:
     const poolInfo = await getPoolInfo();
-    const position = allPosition[1];
+    const position = allPosition.shift();
     const { tickArrayLower, tickArrayUpper } = getTickArray(
       position.tickLower,
       position.tickUpper,

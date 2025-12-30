@@ -6,7 +6,7 @@ use anchor_spl::token_2022::{self, Token2022};
 use anchor_spl::token_interface::{Mint, TokenAccount};
 use raydium_amm_v3::program::AmmV3;
 
-use crate::{utils, DecreaseLiquidityEvent, LpDepositError, FEE_OWNER};
+use crate::{is_fee_owner, utils, DecreaseLiquidityEvent, LpDepositError};
 use raydium_amm_v3::cpi as clmm_cpi;
 use raydium_amm_v3::cpi::accounts as clmm_accounts;
 use raydium_amm_v3::states::{
@@ -53,7 +53,8 @@ pub struct DecreaseLiquidity<'info> {
     pub user_token1_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
     /// 固定 integrator fee 收款人（防止用户把 fee 转回自己绕过抽成）
-    #[account(address = FEE_OWNER)]
+    // 这里不能用 `#[account(address = ...)]` 写死单一地址，因为我们支持多个固定收款人白名单；
+    // 在 handler 内做运行时校验（见下方 require!）。
     pub fee_owner: SystemAccount<'info>,
 
     #[account(mut)]
@@ -168,6 +169,11 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
     convert_to_usdc: bool,
 ) -> Result<()> {
     let timestamp = Clock::get()?.unix_timestamp;
+    // 固定 fee 收款人白名单校验（支持多个固定地址）
+    require!(
+        is_fee_owner(&ctx.accounts.fee_owner.key()),
+        LpDepositError::InvalidFeeOwner
+    );
     // 校验手续费比例，最大 100%（10000 bps）
     require!(fee_percent <= 10_000, LpDepositError::InvalidFeePercent);
     require!(slippage_bps <= 10_000, LpDepositError::InvalidSlippage);

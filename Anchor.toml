@@ -10,11 +10,19 @@ skip-lint = false
 [programs.devnet]
 lp_handler = "8f3aJQ1ZKmrCfbkipbSqXiyjkDCvyyQ3REMAsrQGFLC7"
 
+[programs.mainnet]
+# 部署到主网后，把这里替换为你在 mainnet 的 programId（通常会和 devnet 不同）
+# 注意：这里必须是合法的 base58 Pubkey。先用 System Program 的地址占位，避免 `anchor keys list` 解析失败。
+lp_handler = "8f3aJQ1ZKmrCfbkipbSqXiyjkDCvyyQ3REMAsrQGFLC7"
+
 [registry]
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "Devnet"
+# 默认保持 devnet；部署主网时建议用命令行覆盖：
+# - anchor deploy --provider.cluster mainnet
+# 或者把这里改成 "mainnet"
+cluster = "devnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]

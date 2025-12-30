@@ -82,11 +82,11 @@ pub struct SwapAndDeposit<'info> {
 
     /// CHECK:  Account to store data for the position's lower tick
     #[account(mut)]
-    pub tick_array_lower: UncheckedAccount<'info>,
+    pub tick_array_lower: AccountLoader<'info, TickArrayState>,
 
     /// CHECK: Account to store data for the position's upper tick
     #[account(mut)]
-    pub tick_array_upper: UncheckedAccount<'info>,
+    pub tick_array_upper: AccountLoader<'info, TickArrayState>,
 
     pub memo_program: Program<'info, Memo>,
 
@@ -333,13 +333,16 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
     );
 
     // 7. 添加流动性
+    // 注意：这里固定传 0 是“刻意设计”
+    // - `liquidity` 参数仅用于上面的 `calculate_optimal_swap_amount` 计算最优兑换比例
+    // - 开仓/加流动性时让 Raydium 根据 amount_0_max/amount_1_max 自动计算实际 liquidity
     open_position_with_token22_nft(
         &ctx,
         tick_lower_index,
         tick_upper_index,
         tick_array_lower_start_index,
         tick_array_upper_start_index,
-        0, // liquidity = 0，让 Raydium 自动计算
+        0,
         amount_0_max,
         amount_1_max,
         base_flag, // base_flag

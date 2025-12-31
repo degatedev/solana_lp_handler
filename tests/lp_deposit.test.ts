@@ -10,8 +10,9 @@ import {
 } from '@solana/web3.js';
 import {
   ApiV3PoolInfoConcentratedItem,
+  CLMM_PROGRAM_ID,
   ClmmKeys,
-  DEVNET_PROGRAM_ID,
+  // DEVNET_PROGRAM_ID,
   getATAAddress,
   getPdaExBitmapAccount,
   getPdaPersonalPositionAddress,
@@ -64,6 +65,7 @@ describe('lp_deposit', () => {
 
   it('lp_deposit test', async () => {
     // Add your test here.
+    console.log('userWallet', userWallet.publicKey.toBase58());
     const { tickLower, tickUpper } = getTickLowerAndUpper(poolKeys, startPrice, endPrice);
     const poolProgramId = new PublicKey(poolKeys.programId);
 
@@ -82,7 +84,7 @@ describe('lp_deposit', () => {
     const personalPosition = getPdaPersonalPositionAddress(poolProgramId, positionNftMint);
     const poolInfo = await getPoolInfo();
     const res = await solveZapSingleSidedCLMM({
-      connection: connection,
+      connection: raydium.connection,
       apiPoolItem: poolInfo,
       tickLower: tickLower,
       tickUpper: tickUpper,
@@ -114,12 +116,18 @@ describe('lp_deposit', () => {
     const tickArrayBitmapExtension = getPdaExBitmapAccount(poolProgramId, pool_address).publicKey;
     const remainingAccounts = [];
 
-    const data = await raydium.clmm.getPoolInfoFromRpc(pool_address.toBase58());
-    const tickArrayCache = data.tickData;
+    const clmmPoolInfo = await PoolUtils.fetchComputeClmmInfo({
+      connection: raydium.connection,
+      poolInfo
+    });
+    const tickCache = await PoolUtils.fetchMultiplePoolTickArrays({
+      connection: raydium.connection,
+      poolKeys: [clmmPoolInfo]
+    });
 
     const swapAmountOut = await PoolUtils.computeAmountOutFormat({
-      poolInfo: data.computePoolInfo,
-      tickArrayCache: tickArrayCache[pool_address.toBase58()],
+      poolInfo: clmmPoolInfo,
+      tickArrayCache: tickCache[pool_address.toBase58()],
       amountIn: new BN(deposit_amount),
       tokenOut: poolInfo[deposit_token_mint.equals(new PublicKey(poolKeys.mintA.address)) ? 'mintB' : 'mintA'],
       slippage: 0.01,
@@ -139,34 +147,48 @@ describe('lp_deposit', () => {
         isWritable: true
       });
     });
+
+    console.log('CLMM_PROGRAM_ID', CLMM_PROGRAM_ID);
+    const accounts = {
+      raydiumClmmProgram: CLMM_PROGRAM_ID,
+      memoProgram: MEMO_PROGRAM_ID,
+      user: user,
+      ammConfig: new PublicKey(poolKeys.config.id),
+      poolState: pool_address,
+      observationState: new PublicKey(poolKeys.observationId),
+      userToken0Account: userToken0Account.tokenAccount,
+      userToken1Account: userToken1Account.tokenAccount,
+      positionNftOwner: user,
+      positionNftMint,
+      positionNftAccount: positionNftAccount.publicKey,
+      protocolPosition,
+      tickArrayLower,
+      tickArrayUpper,
+      personalPosition: personalPosition.publicKey,
+      rent: SYSVAR_RENT_PUBKEY,
+      systemProgram: SYSTEM_PROGRAM_ID,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+      tokenProgram2022: TOKEN_2022_PROGRAM_ID,
+      tokenVault0: new PublicKey(poolKeys.vault.A),
+      tokenVault1: new PublicKey(poolKeys.vault.B),
+      vault0Mint: new PublicKey(poolKeys.mintA.address),
+      vault1Mint: new PublicKey(poolKeys.mintB.address)
+    };
+    console.log(
+      'accounts',
+      JSON.stringify(
+        {
+          ...accounts,
+          ...remainingAccounts
+        },
+        null,
+        2
+      )
+    );
     const instruction = await program.methods
       .swapAndDeposit(new BN(deposit_amount), deposit_token_mint, tickLower, tickUpper, res2.liquidity, slippage)
-      .accountsStrict({
-        raydiumClmmProgram: DEVNET_PROGRAM_ID.CLMM_PROGRAM_ID,
-        memoProgram: MEMO_PROGRAM_ID,
-        user: user,
-        ammConfig: new PublicKey(poolKeys.config.id),
-        poolState: pool_address,
-        observationState: new PublicKey(poolKeys.observationId),
-        userToken0Account: userToken0Account.tokenAccount,
-        userToken1Account: userToken1Account.tokenAccount,
-        positionNftOwner: user,
-        positionNftMint,
-        positionNftAccount: positionNftAccount.publicKey,
-        protocolPosition,
-        tickArrayLower,
-        tickArrayUpper,
-        personalPosition: personalPosition.publicKey,
-        rent: SYSVAR_RENT_PUBKEY,
-        systemProgram: SYSTEM_PROGRAM_ID,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-        tokenProgram2022: TOKEN_2022_PROGRAM_ID,
-        tokenVault0: new PublicKey(poolKeys.vault.A),
-        tokenVault1: new PublicKey(poolKeys.vault.B),
-        vault0Mint: new PublicKey(poolKeys.mintA.address),
-        vault1Mint: new PublicKey(poolKeys.mintB.address)
-      })
+      .accountsStrict(accounts)
       .remainingAccounts(remainingAccounts)
       .instruction();
 

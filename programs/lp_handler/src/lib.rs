@@ -6,7 +6,13 @@ pub mod state;
 use instructions::*;
 use state::*;
 
-declare_id!("8f3aJQ1ZKmrCfbkipbSqXiyjkDCvyyQ3REMAsrQGFLC7");
+// ProgramId 需要与部署的 program keypair 对应的地址一致。
+// - 默认（不带 feature）：devnet
+// - 编译带 `--features mainnet`：mainnet
+#[cfg(feature = "mainnet")]
+declare_id!("CkNvt3vAo9gQ288sKLwdiGL5tcLkGowmLXXjmxYvH6ZT");
+#[cfg(not(feature = "mainnet"))]
+declare_id!("3SuoycRhZARYUxLoxmK9oLeBXtzxtTm2b81nM5VivaFC");
 
 #[program]
 pub mod lp_handler {

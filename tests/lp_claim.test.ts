@@ -10,6 +10,7 @@ import {
 } from '@solana/web3.js';
 import {
   ApiV3PoolInfoConcentratedItem,
+  CLMM_PROGRAM_ID,
   ClmmInstrument,
   ClmmKeys,
   DEVNET_PROGRAM_ID,
@@ -64,7 +65,7 @@ describe('lp_claim', () => {
   });
   it('lp_claim test', async () => {
     const poolProgramId = new PublicKey(poolKeys.programId);
-    const allPosition = await raydium.clmm.getOwnerPositionInfo({ programId: DEVNET_PROGRAM_ID.CLMM_PROGRAM_ID }); // devnet:
+    const allPosition = await raydium.clmm.getOwnerPositionInfo({ programId: CLMM_PROGRAM_ID }); // devnet:
     const poolInfo = await getPoolInfo();
     const position = allPosition.shift();
     console.log('position', allPosition.length, position.nftMint.toBase58());
@@ -90,25 +91,32 @@ describe('lp_claim', () => {
     const personalPosition = getPdaPersonalPositionAddress(poolProgramId, position.nftMint);
     const tickArrayBitmapExtension = getPdaExBitmapAccount(poolProgramId, pool_address).publicKey;
     const remainingAccounts = [];
-    const data = await raydium.clmm.getPoolInfoFromRpc(pool_address.toBase58());
-    const tickArrayCache = data.tickData;
+
+    const clmmPoolInfo = await PoolUtils.fetchComputeClmmInfo({
+      connection: raydium.connection,
+      poolInfo
+    });
+    const tickCache = await PoolUtils.fetchMultiplePoolTickArrays({
+      connection: raydium.connection,
+      poolKeys: [clmmPoolInfo]
+    });
 
     const swapAmountOut = await PoolUtils.computeAmountOutFormat({
-      poolInfo: data.computePoolInfo,
-      tickArrayCache: tickArrayCache[pool_address.toBase58()],
+      poolInfo: clmmPoolInfo,
+      tickArrayCache: tickCache[pool_address.toBase58()],
       amountIn: new BN(deposit_amount),
       tokenOut: poolInfo[deposit_token_mint.equals(new PublicKey(poolKeys.mintA.address)) ? 'mintA' : 'mintB'],
       slippage: 0.01,
       epochInfo: await raydium.fetchEpochInfo()
     });
 
-    // if (tickArrayBitmapExtension) {
-    //   remainingAccounts.push({
-    //     pubkey: tickArrayBitmapExtension,
-    //     isSigner: false,
-    //     isWritable: true
-    //   });
-    // }
+    if (tickArrayBitmapExtension) {
+      remainingAccounts.push({
+        pubkey: tickArrayBitmapExtension,
+        isSigner: false,
+        isWritable: true
+      });
+    }
     swapAmountOut.remainingAccounts.forEach((item) => {
       remainingAccounts.push({
         pubkey: item,
@@ -117,7 +125,7 @@ describe('lp_claim', () => {
       });
     });
     const accounts = {
-      raydiumClmmProgram: DEVNET_PROGRAM_ID.CLMM_PROGRAM_ID,
+      raydiumClmmProgram: CLMM_PROGRAM_ID,
       user: user,
       ammConfig: new PublicKey(poolKeys.config.id),
       poolState: pool_address,
@@ -151,9 +159,7 @@ describe('lp_claim', () => {
       .instruction();
 
     let addressLookupTableAccounts = [];
-    const res = await connection.getAddressLookupTable(
-      new PublicKey(poolKeys.lookupTableAccount || '7d6JyYAdBWyFNVB47ydVrkydkyZehHAQVYbUrzSsG8wr')
-    );
+    const res = await connection.getAddressLookupTable(new PublicKey(poolKeys.lookupTableAccount));
     if (res.value) {
       addressLookupTableAccounts.push(res.value);
     }

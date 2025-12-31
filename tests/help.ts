@@ -19,20 +19,20 @@ export const program = anchor.workspace.lpHandler as Program<LpHandler>;
 
 export const userWallet = anchor.AnchorProvider.env().wallet;
 export const user = userWallet.publicKey;
-export const pool_address = new PublicKey('FXAXqgjNK6JVzVV2frumKTEuxC8hTEUhVTJTRhMMwLmM');
+export const pool_address = new PublicKey('HHQUnUbmWLrYzkscDY1C3deEFbGtiGBGoHjpANogmvum');
 
 export const connection = anchor.AnchorProvider.env().connection;
 
 export const getRaydium = async () => {
   return await Raydium.load({
     connection: connection,
-    cluster: 'devnet',
+    cluster: 'mainnet',
     disableFeatureCheck: true,
     owner: user,
-    disableLoadToken: true,
-    urlConfigs: {
-      BASE_HOST: 'https://api-v3-devnet.raydium.io'
-    }
+    disableLoadToken: true
+    // urlConfigs: {
+    //   BASE_HOST: 'https://api-v3-devnet.raydium.io'
+    // }
   });
 };
 
@@ -96,10 +96,10 @@ export const getTickArray = (tickLower: number, tickUpper: number, poolKeys: Clm
   return { tickArrayLower, tickArrayUpper };
 };
 
-export const deposit_amount = 111111111;
-export const deposit_token_mint = new PublicKey('So11111111111111111111111111111111111111112');
+export const deposit_amount = 1000000;
+export const deposit_token_mint = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
 export const slippage = 500;
-export const startPrice = 800;
-export const endPrice = 1200;
-export const fee_address = new PublicKey('8X35rQUK2u9hfn8rMPwwr6ZSEUhbmfDPEapp589XyoM1');
+export const startPrice = 431;
+export const endPrice = 522;
+export const fee_address = new PublicKey('E32ykUTbi4Ag8t4Hic41HtDVwAZca1oGorqvkt3YS7Dy');
 export const fee_percent = 1200;

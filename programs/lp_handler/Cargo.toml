@@ -9,7 +9,7 @@ crate-type = ["cdylib", "lib"]
 name = "lp_handler"
 
 [features]
-default = []
+default = ["raydium-devnet"]
 cpi = ["no-entrypoint"]
 no-entrypoint = []
 no-idl = []
@@ -19,13 +19,14 @@ anchor-debug = []
 custom-heap = []
 custom-panic = []
 mainnet = []
+raydium-devnet = ["raydium-amm-v3/devnet"]
 
 
 [dependencies]
 anchor-lang = "0.31.1"
 anchor-spl = { version = "0.31.1", features = ["metadata", "memo"] }
  
-raydium-amm-v3 = { git = "https://github.com/raydium-io/raydium-clmm.git", features = ["cpi", "no-entrypoint", "devnet"] }
+raydium-amm-v3 = { git = "https://github.com/raydium-io/raydium-clmm.git", features = ["cpi", "no-entrypoint"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

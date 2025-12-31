@@ -195,7 +195,7 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
             || deposit_mint == ctx.accounts.vault_1_mint.key(),
         LpDepositError::InvalidDepositMint
     );
-    require!(slippage_bps <= 10_000, LpDepositError::InvalidSlippage);
+    require!(slippage_bps < 5_000, LpDepositError::InvalidSlippage);
 
     // 2. 判断存入的是 token0 还是 token1
     let is_token0 = deposit_mint == ctx.accounts.vault_0_mint.key();

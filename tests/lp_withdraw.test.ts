@@ -12,6 +12,7 @@ import {
 } from '@solana/web3.js';
 import {
   ApiV3PoolInfoConcentratedItem,
+  CLMM_PROGRAM_ID,
   ClmmInstrument,
   ClmmKeys,
   DEVNET_PROGRAM_ID,
@@ -66,7 +67,7 @@ describe('lp_withdraw', () => {
   });
   it('lp_withdraw test', async () => {
     const poolProgramId = new PublicKey(poolKeys.programId);
-    const allPosition = await raydium.clmm.getOwnerPositionInfo({ programId: DEVNET_PROGRAM_ID.CLMM_PROGRAM_ID }); // devnet:
+    const allPosition = await raydium.clmm.getOwnerPositionInfo({ programId: CLMM_PROGRAM_ID }); // devnet:
     const poolInfo = await getPoolInfo();
     const position = allPosition.shift();
     const { tickArrayLower, tickArrayUpper } = getTickArray(
@@ -118,7 +119,7 @@ describe('lp_withdraw', () => {
       });
     });
     const accounts = {
-      raydiumClmmProgram: DEVNET_PROGRAM_ID.CLMM_PROGRAM_ID,
+      raydiumClmmProgram: CLMM_PROGRAM_ID,
       user: user,
       ammConfig: new PublicKey(poolKeys.config.id),
       poolState: pool_address,

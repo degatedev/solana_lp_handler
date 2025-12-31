@@ -13,7 +13,6 @@ import {
   CLMM_PROGRAM_ID,
   ClmmInstrument,
   ClmmKeys,
-  DEVNET_PROGRAM_ID,
   getATAAddress,
   getPdaExBitmapAccount,
   getPdaPersonalPositionAddress,
@@ -65,10 +64,10 @@ describe('lp_claim', () => {
   });
   it('lp_claim test', async () => {
     const poolProgramId = new PublicKey(poolKeys.programId);
-    const allPosition = await raydium.clmm.getOwnerPositionInfo({ programId: CLMM_PROGRAM_ID }); // devnet:
+    const allPosition = await raydium.clmm.getOwnerPositionInfo({ programId: CLMM_PROGRAM_ID });
     const poolInfo = await getPoolInfo();
-    const position = allPosition.shift();
-    console.log('position', allPosition.length, position.nftMint.toBase58());
+    const position = allPosition[0];
+    console.log('position', allPosition.length, position.nftMint.toBase58(), userWallet.publicKey.toBase58());
     const { tickArrayLower, tickArrayUpper } = getTickArray(
       position.tickLower,
       position.tickUpper,
@@ -110,6 +109,7 @@ describe('lp_claim', () => {
       epochInfo: await raydium.fetchEpochInfo()
     });
 
+    // 添加 swap_remaining
     if (tickArrayBitmapExtension) {
       remainingAccounts.push({
         pubkey: tickArrayBitmapExtension,
@@ -124,6 +124,63 @@ describe('lp_claim', () => {
         isWritable: true
       });
     });
+    // 添加分隔符
+    remainingAccounts.push({
+      pubkey: program.programId,
+      isSigner: false,
+      isWritable: false
+    });
+    // 添加 decrease_liquidity_v2 的 remaining accounts
+
+    const tickArrayLowerStartIndex = TickUtils.getTickArrayStartIndexByTick(
+      position.tickLower,
+      poolInfo.config.tickSpacing
+    );
+    const tickArrayUpperStartIndex = TickUtils.getTickArrayStartIndexByTick(
+      position.tickUpper,
+      poolInfo.config.tickSpacing
+    );
+
+    if (
+      PoolUtils.isOverflowDefaultTickarrayBitmap(poolInfo.config.tickSpacing, [
+        tickArrayLowerStartIndex,
+        tickArrayUpperStartIndex
+      ])
+    ) {
+      remainingAccounts.push({
+        pubkey: tickArrayBitmapExtension,
+        isSigner: false,
+        isWritable: true
+      });
+    }
+    const createAccountsInstructions = [];
+    await Promise.all(
+      poolInfo.rewardDefaultInfos.map(async (item, index) => {
+        const mintAddress = item.mint.address;
+        const ownerRewardVault = await getTokenAta(connection, new PublicKey(mintAddress), user);
+        createAccountsInstructions.push(ownerRewardVault.instruction);
+        const poolRewardVault = new PublicKey(poolKeys.rewardInfos[index].vault);
+        const rewardMint = new PublicKey(mintAddress);
+        remainingAccounts.push(
+          {
+            pubkey: poolRewardVault,
+            isSigner: false,
+            isWritable: true
+          },
+          {
+            pubkey: ownerRewardVault.tokenAccount,
+            isSigner: false,
+            isWritable: true
+          },
+          {
+            pubkey: rewardMint,
+            isSigner: false,
+            isWritable: true
+          }
+        );
+      })
+    );
+
     const accounts = {
       raydiumClmmProgram: CLMM_PROGRAM_ID,
       user: user,
@@ -174,6 +231,7 @@ describe('lp_claim', () => {
           ComputeBudgetProgram.setComputeUnitPrice({
             microLamports: 1000
           }),
+          ...createAccountsInstructions,
           instruction
         ]
       }).compileToV0Message(addressLookupTableAccounts)

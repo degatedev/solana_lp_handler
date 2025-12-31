@@ -19,7 +19,7 @@ export const program = anchor.workspace.lpHandler as Program<LpHandler>;
 
 export const userWallet = anchor.AnchorProvider.env().wallet;
 export const user = userWallet.publicKey;
-export const pool_address = new PublicKey('HHQUnUbmWLrYzkscDY1C3deEFbGtiGBGoHjpANogmvum');
+export const pool_address = new PublicKey('3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv');
 
 export const connection = anchor.AnchorProvider.env().connection;
 
@@ -30,21 +30,18 @@ export const getRaydium = async () => {
     disableFeatureCheck: true,
     owner: user,
     disableLoadToken: true
-    // urlConfigs: {
-    //   BASE_HOST: 'https://api-v3-devnet.raydium.io'
-    // }
   });
 };
 
-export const getPoolKeys = async () => {
+export const getPoolKeys = async (poolId: PublicKey = pool_address) => {
   const raydium = await getRaydium();
-  const p = await raydium.api.fetchPoolKeysById({ idList: [pool_address.toBase58()] });
+  const p = await raydium.api.fetchPoolKeysById({ idList: [poolId.toBase58()] });
   return p[0] as ClmmKeys;
 };
 
-export const getPoolInfo = async () => {
+export const getPoolInfo = async (poolId: PublicKey = pool_address) => {
   const raydium = await getRaydium();
-  const [poolInfo] = await raydium.api.fetchPoolById({ ids: pool_address.toBase58() });
+  const [poolInfo] = await raydium.api.fetchPoolById({ ids: poolId.toBase58() });
   return poolInfo as unknown as ApiV3PoolInfoConcentratedItem;
 };
 export const getTokenAccountProgramId = async (connection: Connection, mint: PublicKey) => {
@@ -98,7 +95,7 @@ export const getTickArray = (tickLower: number, tickUpper: number, poolKeys: Clm
 
 export const deposit_amount = 1000000;
 export const deposit_token_mint = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
-export const slippage = 500;
+export const slippage = 50;
 export const startPrice = 431;
 export const endPrice = 522;
 export const fee_address = new PublicKey('E32ykUTbi4Ag8t4Hic41HtDVwAZca1oGorqvkt3YS7Dy');

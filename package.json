@@ -4,9 +4,7 @@
     "lint:fix": "prettier */*.js \"*/**/*{.js,.ts}\" -w",
     "lint": "prettier */*.js \"*/**/*{.js,.ts}\" --check",
     "build": "anchor build",
-    "deploy:devnet": "anchor build && anchor deploy --program-name lp_handler --provider.cluster devnet --provider.wallet ./wallet/dev.json --program-keypair ./id/lp_handler-devnet-keypair.json",
-    "deploy:mainnet": "anchor build -- --no-default-features --features mainnet && anchor deploy --program-name lp_handler --provider.cluster mainnet --provider.wallet ./wallet/mainnet.json --program-keypair ./id/lp_handler-mainnet-keypair.json",
-    "test:mainnet": "anchor test -- --no-default-features --features mainnet"
+    "deploy": "anchor build && anchor deploy --program-name lp_handler --provider.cluster mainnet --provider.wallet ./wallet/mainnet.json --program-keypair ./id/lp_handler-keypair.json"
   },
   "dependencies": {
     "@coral-xyz/anchor": "0.31.1",

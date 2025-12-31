@@ -47,21 +47,15 @@ pub struct SwapAndDeposit<'info> {
     #[account(mut)]
     pub observation_state: AccountLoader<'info, ObservationState>,
 
-    /// user 的 token0 ATA 账户（如果不存在则自动创建）
     #[account(
-        init_if_needed,
-        payer = user,
-        associated_token::mint = vault_0_mint,
-        associated_token::authority = user,
+        mut,
+        token::mint = token_vault_0.mint,
     )]
     pub user_token0_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
-    /// user 的 token1 ATA 账户（如果不存在则自动创建）
     #[account(
-        init_if_needed,
-        payer = user,
-        associated_token::mint = vault_1_mint,
-        associated_token::authority = user,
+        mut,
+        token::mint = token_vault_1.mint,
     )]
     pub user_token1_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
@@ -81,11 +75,11 @@ pub struct SwapAndDeposit<'info> {
     pub protocol_position: UncheckedAccount<'info>,
 
     /// CHECK:  Account to store data for the position's lower tick
-    #[account(mut)]
+    #[account(mut, constraint = tick_array_lower.load()?.pool_id == pool_state.key())]
     pub tick_array_lower: AccountLoader<'info, TickArrayState>,
 
-    /// CHECK: Account to store data for the position's upper tick
-    #[account(mut)]
+    /// Stores init state for the upper tick
+    #[account(mut, constraint = tick_array_upper.load()?.pool_id == pool_state.key())]
     pub tick_array_upper: AccountLoader<'info, TickArrayState>,
 
     pub memo_program: Program<'info, Memo>,
@@ -203,7 +197,7 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
     // 3. 读取当前池子状态并计算 swap 数量
     // 注意：需要在 swap 之前保存 tick_spacing，因为 swap 会修改 pool_state
     let mut swap_amount_min = 0;
-    let (_current_tick, swap_amount_in, swap_amount_out, tick_spacing) = {
+    let (_current_tick, swap_amount_in, swap_amount_out, tick_spacing, current_sqrt_price_x64) = {
         let pool_state = ctx.accounts.pool_state.load()?;
         let current_sqrt_price_x64 = pool_state.sqrt_price_x64;
         let current_tick = pool_state.tick_current;
@@ -219,7 +213,13 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
             current_sqrt_price_x64,
             liquidity,
         )?;
-        (current_tick, swap_amount, swap_amount_out, tick_spacing)
+        (
+            current_tick,
+            swap_amount,
+            swap_amount_out,
+            tick_spacing,
+            current_sqrt_price_x64,
+        )
     };
 
     // 4. 记录 swap 前的余额
@@ -229,11 +229,21 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
     // 5. 执行 swap（如果需要）
     if swap_amount_in > 0 {
         // 计算最小输出（滑点保护）
-        let mut min_amount_out = utils::apply_slippage_bps_floor(swap_amount_out, slippage_bps)?;
+        let mut min_amount_out = utils::calc_min_amount_out(
+            swap_amount_in,
+            is_token0,
+            current_sqrt_price_x64,
+            slippage_bps,
+        )?;
         swap_amount_min = swap_amount_in;
         if swap_amount_in != deposit_amount {
             swap_amount_min = utils::apply_slippage_bps_floor(swap_amount_in, slippage_bps)?;
-            min_amount_out = utils::apply_slippage_bps_floor(swap_amount_out, slippage_bps)?;
+            min_amount_out = utils::calc_min_amount_out(
+                swap_amount_min,
+                is_token0,
+                current_sqrt_price_x64,
+                slippage_bps,
+            )?;
         }
         msg!(
             "Swap params: swap_amount={},min_amount_out={},swap_amount_out={}",

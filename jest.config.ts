@@ -23,10 +23,10 @@ const config: JestConfigWithTsJest = {
     'ts-jest': {
       tsconfig: 'tsconfig.json'
     }
-  },
+  }
   // 可以直接在这里设置环境变量（会覆盖 .env 文件）
   // testEnvironmentOptions: {
-  //   ANCHOR_PROVIDER_URL: 'https://api.devnet.solana.com',
+  //   ANCHOR_PROVIDER_URL: 'https://api.mainnet-beta.solana.com',
   //   ANCHOR_WALLET: process.env.HOME + '/.config/solana/id.json',
   // }
 };

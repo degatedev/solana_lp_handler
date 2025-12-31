@@ -12,7 +12,6 @@ import {
   ApiV3PoolInfoConcentratedItem,
   CLMM_PROGRAM_ID,
   ClmmKeys,
-  // DEVNET_PROGRAM_ID,
   getATAAddress,
   getPdaExBitmapAccount,
   getPdaPersonalPositionAddress,
@@ -211,6 +210,8 @@ describe('lp_deposit', () => {
           ComputeBudgetProgram.setComputeUnitPrice({
             microLamports: 1000
           }),
+          userToken0Account.instruction,
+          userToken1Account.instruction,
           instruction
         ]
       }).compileToV0Message(addressLookupTableAccounts)
@@ -234,7 +235,7 @@ describe('lp_deposit', () => {
     // 498PU5rrcysb6vaL77DRRfpiF296in484oPqWcNyZTgBvhaa5djiHXLhXHtYaRp35d6AaeduPpbkNrr7nKYfcHMG
 
     const data = await connection.getParsedTransaction(
-      '4KLMZBgJJDoXas5SH55rnNjbgb2SuwzzrSAKBrt3TC1jFC31cPKhi4r8Q4RaAqpNmXyGesGEEZMhrgBqZ1wCvYNw',
+      '3U3CDUMLqf1We1Cq9ULVnjRzk1x7waXJk1jrYSGTr9FfW1ePvRY5zAGwdNAp5tbyAD1YXMZyNNsxTZjTAeWkQbzq',
       {
         maxSupportedTransactionVersion: 1,
         commitment: 'confirmed'

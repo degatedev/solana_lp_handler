@@ -15,7 +15,6 @@ import {
   CLMM_PROGRAM_ID,
   ClmmInstrument,
   ClmmKeys,
-  DEVNET_PROGRAM_ID,
   getATAAddress,
   getPdaExBitmapAccount,
   getPdaPersonalPositionAddress,
@@ -67,7 +66,7 @@ describe('lp_withdraw', () => {
   });
   it('lp_withdraw test', async () => {
     const poolProgramId = new PublicKey(poolKeys.programId);
-    const allPosition = await raydium.clmm.getOwnerPositionInfo({ programId: CLMM_PROGRAM_ID }); // devnet:
+    const allPosition = await raydium.clmm.getOwnerPositionInfo({ programId: CLMM_PROGRAM_ID });
     const poolInfo = await getPoolInfo();
     const position = allPosition.shift();
     const { tickArrayLower, tickArrayUpper } = getTickArray(
@@ -104,13 +103,14 @@ describe('lp_withdraw', () => {
       epochInfo: await raydium.fetchEpochInfo()
     });
 
-    // if (tickArrayBitmapExtension) {
-    //   remainingAccounts.push({
-    //     pubkey: tickArrayBitmapExtension,
-    //     isSigner: false,
-    //     isWritable: true
-    //   });
-    // }
+    // 添加 swap_remaining
+    if (tickArrayBitmapExtension) {
+      remainingAccounts.push({
+        pubkey: tickArrayBitmapExtension,
+        isSigner: false,
+        isWritable: true
+      });
+    }
     swapAmountOut.remainingAccounts.forEach((item) => {
       remainingAccounts.push({
         pubkey: item,
@@ -118,6 +118,63 @@ describe('lp_withdraw', () => {
         isWritable: true
       });
     });
+    // 添加分隔符
+    remainingAccounts.push({
+      pubkey: program.programId,
+      isSigner: false,
+      isWritable: false
+    });
+    // 添加 decrease_liquidity_v2 的 remaining accounts
+
+    const tickArrayLowerStartIndex = TickUtils.getTickArrayStartIndexByTick(
+      position.tickLower,
+      poolInfo.config.tickSpacing
+    );
+    const tickArrayUpperStartIndex = TickUtils.getTickArrayStartIndexByTick(
+      position.tickUpper,
+      poolInfo.config.tickSpacing
+    );
+
+    if (
+      PoolUtils.isOverflowDefaultTickarrayBitmap(poolInfo.config.tickSpacing, [
+        tickArrayLowerStartIndex,
+        tickArrayUpperStartIndex
+      ])
+    ) {
+      remainingAccounts.push({
+        pubkey: tickArrayBitmapExtension,
+        isSigner: false,
+        isWritable: true
+      });
+    }
+    const createAccountsInstructions = [];
+    await Promise.all(
+      poolInfo.rewardDefaultInfos.map(async (item, index) => {
+        const mintAddress = item.mint.address;
+        const ownerRewardVault = await getTokenAta(connection, new PublicKey(mintAddress), user);
+        createAccountsInstructions.push(ownerRewardVault.instruction);
+        const poolRewardVault = new PublicKey(poolKeys.rewardInfos[index].vault);
+        const rewardMint = new PublicKey(mintAddress);
+        remainingAccounts.push(
+          {
+            pubkey: poolRewardVault,
+            isSigner: false,
+            isWritable: true
+          },
+          {
+            pubkey: ownerRewardVault.tokenAccount,
+            isSigner: false,
+            isWritable: true
+          },
+          {
+            pubkey: rewardMint,
+            isSigner: false,
+            isWritable: true
+          }
+        );
+      })
+    );
+
     const accounts = {
       raydiumClmmProgram: CLMM_PROGRAM_ID,
       user: user,
@@ -159,9 +216,7 @@ describe('lp_withdraw', () => {
     });
 
     let addressLookupTableAccounts = [];
-    const res = await connection.getAddressLookupTable(
-      new PublicKey(poolKeys.lookupTableAccount || '7d6JyYAdBWyFNVB47ydVrkydkyZehHAQVYbUrzSsG8wr')
-    );
+    const res = await connection.getAddressLookupTable(new PublicKey(poolKeys.lookupTableAccount));
     if (res.value) {
       addressLookupTableAccounts.push(res.value);
     }
@@ -176,6 +231,7 @@ describe('lp_withdraw', () => {
           ComputeBudgetProgram.setComputeUnitPrice({
             microLamports: 1000
           }),
+          ...createAccountsInstructions,
           instruction,
           ...closeInsInfo.instructions
         ]

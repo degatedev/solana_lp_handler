@@ -36,19 +36,15 @@ pub struct DecreaseLiquidity<'info> {
 
     /// user 的 token0 ATA 账户（如果不存在则自动创建）
     #[account(
-          init_if_needed,
-          payer = user,
-          associated_token::mint = vault_0_mint,
-          associated_token::authority = user,
+        mut,
+        token::mint = token_vault_0.mint,
       )]
     pub user_token0_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
     /// user 的 token1 ATA 账户（如果不存在则自动创建）
     #[account(
-          init_if_needed,
-          payer = user,
-          associated_token::mint = vault_1_mint,
-          associated_token::authority = user,
+        mut,
+        token::mint = token_vault_1.mint,
       )]
     pub user_token1_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
@@ -134,17 +130,20 @@ pub struct DecreaseLiquidity<'info> {
     pub personal_position: Box<Account<'info, PersonalPositionState>>,
 
     /// Stores init state for the lower tick
-    #[account(mut)]
+    #[account(mut, constraint = tick_array_lower.load()?.pool_id == pool_state.key())]
     pub tick_array_lower: AccountLoader<'info, TickArrayState>,
 
     /// Stores init state for the upper tick
-    #[account(mut)]
+    #[account(mut, constraint = tick_array_upper.load()?.pool_id == pool_state.key())]
     pub tick_array_upper: AccountLoader<'info, TickArrayState>,
     // ======== IMPORTANT: remaining accounts for swap_v2 =========
     // MUST BE: [bitmap_extension?] + [swap tick arrays ONLY]
     // open_position tick arrays MUST NOT be here!
     //
     // 所有 swap_v2 tick arrays 都在这里动态提供（前端传入）
+
+    // 比如这里我要swap remaining accounts 和 decrease_liquidity_v2 的remaining accounts 用两个集合接收
+
     //
     // 例如：
     // [
@@ -263,8 +262,19 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
         vault_1_mint: accounts.vault_1_mint.to_account_info(),
     };
     // let remaining_account = ctx.remaining_accounts.to_vec();
-    let cpi_ctx = CpiContext::new(cpi_program.clone(), cpi_accounts);
-    // .with_remaining_accounts(remaining_account);
+    let sep = crate::ID; // 你的 lp_handler program id（分隔符）
+
+    let sep_index = ctx
+        .remaining_accounts
+        .iter()
+        .position(|a| a.key() == sep)
+        .ok_or(LpDepositError::InvalidRemainingAccounts)?;
+
+    let (swap_remaining, rest) = ctx.remaining_accounts.split_at(sep_index);
+    let decrease_remaining = &rest[1..]; // 跳过分隔符本身
+
+    let cpi_ctx = CpiContext::new(cpi_program.clone(), cpi_accounts)
+        .with_remaining_accounts(decrease_remaining.to_vec());
     // -----------------------------
     // 关键：用“余额增量 - principal”得到奖励/手续费，再只对奖励/手续费抽成
     // - claim: liquidity=0 => principal=0 => 全部增量都视为奖励/手续费
@@ -358,6 +368,7 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
                 swap_other_amount_threshold,
                 0,
                 input_is_token0,
+                swap_remaining.to_vec(),
             )?;
             ctx.accounts.user_token0_account.reload()?;
             ctx.accounts.user_token1_account.reload()?;
@@ -427,6 +438,7 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
                 swap_other_amount_threshold,
                 0,
                 input_is_token0,
+                swap_remaining.to_vec(),
             )?;
             ctx.accounts.user_token0_account.reload()?;
             ctx.accounts.user_token1_account.reload()?;
@@ -558,6 +570,7 @@ fn swap_v2<'a, 'b, 'c: 'info, 'info>(
     swap_other_amount_threshold: u64,
     sqrt_price_limit_x64: u128,
     is_token0: bool,
+    swap_remaining: Vec<AccountInfo<'info>>,
 ) -> Result<()> {
     // 使用解构简化代码
     let accounts = &ctx.accounts;
@@ -599,7 +612,6 @@ fn swap_v2<'a, 'b, 'c: 'info, 'info>(
         input_vault_mint: input_mint.to_account_info(),
         output_vault_mint: output_mint.to_account_info(),
     };
-    let swap_remaining = ctx.remaining_accounts.to_vec();
     // 轻量校验 remaining_accounts：限制数量并要求 owner 为 Raydium CLMM program（tick array/bitmap 等应满足）
     require!(
         swap_remaining.len() <= 32,

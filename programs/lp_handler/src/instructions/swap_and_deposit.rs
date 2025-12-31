@@ -59,6 +59,8 @@ pub struct SwapAndDeposit<'info> {
     )]
     pub user_token1_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
+    /// CHECK: Receives the position NFT
+    #[account(address = user.key())]
     pub position_nft_owner: UncheckedAccount<'info>,
 
     /// Unique token mint address, initialize in contract

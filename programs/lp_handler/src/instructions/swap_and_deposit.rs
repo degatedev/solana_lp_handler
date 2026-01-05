@@ -60,7 +60,6 @@ pub struct SwapAndDeposit<'info> {
     pub user_token1_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
     /// CHECK: Receives the position NFT
-    #[account(address = user.key())]
     pub position_nft_owner: UncheckedAccount<'info>,
 
     /// Unique token mint address, initialize in contract
@@ -158,12 +157,7 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
     slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
 ) -> Result<()> {
     let timestamp = Clock::get()?.unix_timestamp;
-    // 防钓鱼：仓位 NFT 只能铸给交易签名者本人
-    require_keys_eq!(
-        ctx.accounts.position_nft_owner.key(),
-        ctx.accounts.user.key(),
-        LpDepositError::InvalidPositionNftOwner
-    );
+
     // tick 区间必须合法
     require!(
         tick_lower_index < tick_upper_index,

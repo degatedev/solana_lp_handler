@@ -4,7 +4,7 @@
 npm run  deploy:mainnet
 
 # 关闭合约
-solana program close DpXNTQV53bduqBqhRcxa7hJaP5kArjvcdHvfmEvvxuJr --recipient CB5HJVasNzZ7nWJHJTvuiKm4vF9yb5YFqc9jnnPScKpB --bypass-warning
+solana program close ACSUE44J7Cgz7D6CFWAeWyS73XV1ceyFTqTLnsLw6AYH --recipient CB5HJVasNzZ7nWJHJTvuiKm4vF9yb5YFqc9jnnPScKpB --bypass-warning
 
 # 创建程序id
 solana-keygen new --no-bip39-passphrase --silent -o ./id/lp_handler-keypair.json

@@ -135,6 +135,16 @@ Accounts： `SwapAndDeposit<'info>`
 6. CPI 调用 Raydium `open_position_with_token22_nft`（合约固定传 `liquidity=0`）
 7. 发 `IncreaseLiquidityEvent`
 
+#### 资金去向与“保留策略”
+
+`swap_and_deposit` 的资金使用方式不是“把两边都换得刚刚好再全部花光”，而是采用 **一边保留、一边尽量用完** 的策略（由实现逻辑直接决定）：
+
+* **原始投入币种会保留一部分**：合约会计算 `swap_amount_min`，然后用 `deposit_amount - swap_amount_min` 作为该币种的 `amount_*_max`，也就是说 **不会把投入的那一边换光**。
+* **swap 得到的对侧币种会“全量作为可用上限”提供给开仓**：对侧币种的 `amount_*_max` 直接取 swap 后的余额增量（`balance_after - balance_before`），等价于把 **本次 swap 得到的币全部作为最大可用量** 交给 Raydium 开仓 CPI。
+  + 说明：`open_position_with_token22_nft` 接收的是 `amount_0_max/amount_1_max`（上限），Raydium 会按当时池子价格与区间计算实际消耗；如果因为舍入/价格变化导致没有用完某一边，上限中未消耗的部分会留在用户 ATA。
+
+源码位置（便于核对）： `programs/lp_handler/src/instructions/swap_and_deposit.rs` 中 `amount_0_max/amount_1_max` 的计算处。
+
 ### 4.4 remainingAccounts 规则
 
 `swap_and_deposit` 的 `ctx.remaining_accounts` **只用于 Raydium `swap_v2` **：

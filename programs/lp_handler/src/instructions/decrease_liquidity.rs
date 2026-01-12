@@ -356,10 +356,15 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
         // 1) 先换 reward（如果有）
         let mut reward_out_in_target: u64 = 0;
         if reward_other_in > 0 {
+            // 为了避免“用旧价格估 min_out”导致过严/过松，在 CPI swap_v2 前重新读取 pool_state 的最新价格。
+            let sqrt_price_x64_for_min_out = {
+                let pool_state = ctx.accounts.pool_state.load()?;
+                pool_state.sqrt_price_x64
+            };
             let swap_other_amount_threshold = utils::calc_min_amount_out(
                 reward_other_in,
                 input_is_token0,
-                sqrt_price_x64_before,
+                sqrt_price_x64_for_min_out,
                 slippage_bps,
             )?;
             swap_v2(
@@ -425,11 +430,16 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
         };
         let mut principal_out_in_target: u64 = 0;
         if principal_other_in > 0 {
-            // 此处用 decrease 前缓存的 sqrt_price 作阈值近似（可进一步改为读取当前 pool_state 的 sqrt_price_x64）
+            // 为了避免“用旧价格估 min_out”导致过严/过松，在 CPI swap_v2 前重新读取 pool_state 的最新价格。
+            // 注：本次 swap 可能紧跟 reward swap 之后，因此必须再次读取。
+            let sqrt_price_x64_for_min_out = {
+                let pool_state = ctx.accounts.pool_state.load()?;
+                pool_state.sqrt_price_x64
+            };
             let swap_other_amount_threshold = utils::calc_min_amount_out(
                 principal_other_in,
                 input_is_token0,
-                sqrt_price_x64_before,
+                sqrt_price_x64_for_min_out,
                 slippage_bps,
             )?;
             swap_v2(

@@ -191,9 +191,8 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
     // 3. 读取当前池子状态并计算 swap 数量
     // 注意：需要在 swap 之前保存 tick_spacing，因为 swap 会修改 pool_state
     let mut swap_amount_min = 0;
-    let (_current_tick, swap_amount_in, swap_amount_out, tick_spacing, current_sqrt_price_x64) = {
+    let (_current_tick, swap_amount_in, swap_amount_out, tick_spacing) = {
         let pool_state = ctx.accounts.pool_state.load()?;
-        let current_sqrt_price_x64 = pool_state.sqrt_price_x64;
         let current_tick = pool_state.tick_current;
         let tick_spacing = pool_state.tick_spacing;
 
@@ -204,16 +203,10 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
             current_tick,
             tick_lower_index,
             tick_upper_index,
-            current_sqrt_price_x64,
+            pool_state.sqrt_price_x64,
             liquidity,
         )?;
-        (
-            current_tick,
-            swap_amount,
-            swap_amount_out,
-            tick_spacing,
-            current_sqrt_price_x64,
-        )
+        (current_tick, swap_amount, swap_amount_out, tick_spacing)
     };
 
     // 4. 记录 swap 前的余额
@@ -223,10 +216,15 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
     // 5. 执行 swap（如果需要）
     if swap_amount_in > 0 {
         // 计算最小输出（滑点保护）
+        // 为了避免“用旧价格估 min_out”导致过严/过松，在 CPI swap_v2 前重新读取 pool_state 的最新价格。
+        let sqrt_price_x64_for_min_out = {
+            let pool_state = ctx.accounts.pool_state.load()?;
+            pool_state.sqrt_price_x64
+        };
         let mut min_amount_out = utils::calc_min_amount_out(
             swap_amount_in,
             is_token0,
-            current_sqrt_price_x64,
+            sqrt_price_x64_for_min_out,
             slippage_bps,
         )?;
         swap_amount_min = swap_amount_in;
@@ -235,7 +233,7 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
             min_amount_out = utils::calc_min_amount_out(
                 swap_amount_min,
                 is_token0,
-                current_sqrt_price_x64,
+                sqrt_price_x64_for_min_out,
                 slippage_bps,
             )?;
         }

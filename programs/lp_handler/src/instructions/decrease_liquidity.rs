@@ -182,12 +182,6 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
         LpDepositError::InvalidDepositMint
     );
 
-    // 预先读取 pool 状态（后续 CPI 可能修改 pool_state），并缓存计算 principal 所需的价格信息
-    let pool_state = ctx.accounts.pool_state.load()?;
-    let tick_current_before = pool_state.tick_current;
-    let sqrt_price_x64_before = pool_state.sqrt_price_x64;
-    drop(pool_state);
-
     // 固定 fee 收款账户：必须是 fee_owner 对应 mint 的 ATA（支持 token / token2022）
     // vault mint 的账户 owner 就是它的 token program（spl-token 或 token-2022）
     let vault0_token_program = ctx.accounts.vault_0_mint.to_account_info().owner;
@@ -283,6 +277,11 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
     let (principal_expected_0, principal_expected_1) = if liquidity == 0 {
         (0u64, 0u64)
     } else {
+        let (tick_current_before, sqrt_price_x64_before) = {
+            let pool_state = ctx.accounts.pool_state.load()?;
+            (pool_state.tick_current, pool_state.sqrt_price_x64)
+        };
+
         utils::calculate_principal_amounts_for_liquidity(
             tick_current_before,
             sqrt_price_x64_before,

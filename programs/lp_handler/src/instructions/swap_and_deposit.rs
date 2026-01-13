@@ -226,6 +226,7 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
             is_token0,
             sqrt_price_x64_for_min_out,
             slippage_bps,
+            ctx.accounts.amm_config.trade_fee_rate,
         )?;
         swap_amount_min = swap_amount_in;
         if swap_amount_in != deposit_amount {
@@ -235,6 +236,7 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
                 is_token0,
                 sqrt_price_x64_for_min_out,
                 slippage_bps,
+                ctx.accounts.amm_config.trade_fee_rate,
             )?;
         }
         msg!(

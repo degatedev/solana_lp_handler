@@ -365,6 +365,7 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
                 input_is_token0,
                 sqrt_price_x64_for_min_out,
                 slippage_bps,
+                ctx.accounts.amm_config.trade_fee_rate,
             )?;
             swap_v2(
                 &ctx,
@@ -440,6 +441,7 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
                 input_is_token0,
                 sqrt_price_x64_for_min_out,
                 slippage_bps,
+                ctx.accounts.amm_config.trade_fee_rate,
             )?;
             swap_v2(
                 &ctx,

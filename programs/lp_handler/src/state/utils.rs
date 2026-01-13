@@ -8,8 +8,10 @@ pub fn calc_min_amount_out(
     is_base_input: bool,
     sqrt_price_x64: u128,
     slippage_bps: u16,
+    trade_fee_rate: u32, // Raydium: denominated in hundredths of a bip (10^-6), i.e. 1_000_000 = 100%
 ) -> Result<u64> {
     require!(slippage_bps <= 10_000, LpDepositError::InvalidSlippage);
+    require!(trade_fee_rate <= 1_000_000, LpDepositError::MathOverflow);
 
     let amount_in = U256::from(swap_amount as u128);
     let sqrt_price = U256::from(sqrt_price_x64);
@@ -19,15 +21,14 @@ pub fn calc_min_amount_out(
     require!(!price_q128.is_zero(), LpDepositError::InvalidSqrtPrice);
 
     let slippage_factor = U256::from(10_000u128 - slippage_bps as u128);
+    let fee_factor = U256::from(1_000_000u128 - trade_fee_rate as u128); // 10^-6
 
-    let out = if is_base_input {
+    let out_before_fee_and_slippage = if is_base_input {
         // token0 → token1
         //
         // out = in * price  (price 是 Q64.64，需要右移 64)
         let raw = (amount_in * price_q128) >> 64;
-
-        // apply slippage
-        (raw * slippage_factor) / U256::from(10_000u128)
+        raw
     } else {
         // token1 → token0
         //
@@ -38,11 +39,18 @@ pub fn calc_min_amount_out(
         let inv_price = ((U256::one() << 64) << 64) / price_q128;
 
         let raw = (amount_in * inv_price) >> 64;
-
-        // apply slippage
-        (raw * slippage_factor) / U256::from(10_000u128)
+        raw
     };
 
+    // apply Raydium trade fee (10^-6) then slippage (bps)
+    let out_after_fee = (out_before_fee_and_slippage * fee_factor) / U256::from(1_000_000u128);
+    let out = (out_after_fee * slippage_factor) / U256::from(10_000u128);
+
+    // 防御：避免 U256 -> u64 截断
+    require!(
+        out <= U256::from(u64::MAX as u128),
+        LpDepositError::MathOverflow
+    );
     Ok(out.as_u64())
 }
 

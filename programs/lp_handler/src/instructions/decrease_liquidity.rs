@@ -138,8 +138,6 @@ pub struct DecreaseLiquidity<'info> {
     pub tick_array_upper: AccountLoader<'info, TickArrayState>,
     // ======== IMPORTANT: remaining accounts for swap_v2 =========
     // MUST BE: [bitmap_extension?] + [swap tick arrays ONLY]
-    // open_position tick arrays MUST NOT be here!
-    //
     // 所有 swap_v2 tick arrays 都在这里动态提供（前端传入）
 
     // 比如这里我要swap remaining accounts 和 decrease_liquidity_v2 的remaining accounts 用两个集合接收
@@ -153,7 +151,6 @@ pub struct DecreaseLiquidity<'info> {
     //   swap_tick_array_2,
     // ]
     //
-    // open_position 的 tick_array_lower / upper 由上面两个字段指定，不混在这里
     //
 }
 

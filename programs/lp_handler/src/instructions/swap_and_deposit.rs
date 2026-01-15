@@ -73,13 +73,13 @@ pub struct SwapAndDeposit<'info> {
     /// CHECK: Deprecated: protocol_position is deprecated and kept for compatibility.
     pub protocol_position: UncheckedAccount<'info>,
 
-    /// CHECK:  Account to store data for the position's lower tick
-    #[account(mut, constraint = tick_array_lower.load()?.pool_id == pool_state.key())]
-    pub tick_array_lower: AccountLoader<'info, TickArrayState>,
+    /// CHECK: TickArray PDA account used by Raydium CLMM; checked/derived by the Raydium CLMM program during CPI.
+    #[account(mut)]
+    pub tick_array_lower: UncheckedAccount<'info>,
 
-    /// Stores init state for the upper tick
-    #[account(mut, constraint = tick_array_upper.load()?.pool_id == pool_state.key())]
-    pub tick_array_upper: AccountLoader<'info, TickArrayState>,
+    /// CHECK: TickArray PDA account used by Raydium CLMM; checked/derived by the Raydium CLMM program during CPI.
+    #[account(mut)]
+    pub tick_array_upper: UncheckedAccount<'info>,
 
     pub memo_program: Program<'info, Memo>,
 
@@ -213,6 +213,17 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
     let balance_0_before = ctx.accounts.user_token0_account.amount;
     let balance_1_before = ctx.accounts.user_token1_account.amount;
 
+    let sep = crate::ID; // 你的 lp_handler program id（分隔符）
+
+    let sep_index = ctx
+        .remaining_accounts
+        .iter()
+        .position(|a| a.key() == sep)
+        .ok_or(LpDepositError::InvalidRemainingAccounts)?;
+
+    let (swap_remaining, rest) = ctx.remaining_accounts.split_at(sep_index);
+    let open_position_remaining = &rest[1..]; // 跳过分隔符本身
+
     // 5. 执行 swap（如果需要）
     if swap_amount_in > 0 {
         // 计算最小输出（滑点保护）
@@ -246,7 +257,14 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
             swap_amount_out
         );
         // 执行 swap
-        swap_v2(&ctx, swap_amount_min, min_amount_out, 0, is_token0)?;
+        swap_v2(
+            &ctx,
+            swap_amount_min,
+            min_amount_out,
+            0,
+            is_token0,
+            swap_remaining.to_vec(),
+        )?;
         // 6. 读取 swap 后的余额并计算实际可用数量
         ctx.accounts.user_token0_account.reload()?;
         ctx.accounts.user_token1_account.reload()?;
@@ -342,6 +360,7 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
         amount_0_max,
         amount_1_max,
         base_flag, // base_flag
+        open_position_remaining.to_vec(),
     )?;
 
     // 销毁ata账户
@@ -370,6 +389,7 @@ fn swap_v2<'a, 'b, 'c: 'info, 'info>(
     swap_other_amount_threshold: u64,
     sqrt_price_limit_x64: u128,
     is_token0: bool,
+    swap_remaining: Vec<AccountInfo<'info>>,
 ) -> Result<()> {
     // 使用解构简化代码
     let accounts = &ctx.accounts;
@@ -411,7 +431,6 @@ fn swap_v2<'a, 'b, 'c: 'info, 'info>(
         input_vault_mint: input_mint.to_account_info(),
         output_vault_mint: output_mint.to_account_info(),
     };
-    let swap_remaining = ctx.remaining_accounts.to_vec();
     // 轻量校验 remaining_accounts：限制数量并要求 owner 为 Raydium CLMM program（tick array/bitmap 等应满足）
     require!(
         swap_remaining.len() <= 32,
@@ -449,6 +468,7 @@ fn open_position_with_token22_nft<'a, 'b, 'c: 'info, 'info>(
     amount_0_max: u64,
     amount_1_max: u64,
     base_flag: Option<bool>,
+    open_position_remaining: Vec<AccountInfo<'info>>,
 ) -> Result<()> {
     let cpi_program = ctx.accounts.raydium_clmm_program.to_account_info();
 
@@ -477,7 +497,8 @@ fn open_position_with_token22_nft<'a, 'b, 'c: 'info, 'info>(
         vault_1_mint: accounts.vault_1_mint.to_account_info(),
     };
 
-    let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
+    let cpi_ctx =
+        CpiContext::new(cpi_program, cpi_accounts).with_remaining_accounts(open_position_remaining);
 
     clmm_cpi::open_position_with_token22_nft(
         cpi_ctx,

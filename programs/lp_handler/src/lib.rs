@@ -8,7 +8,7 @@ use state::*;
 
 // ProgramId 需要与部署的 program keypair 对应的地址一致。
 // 本分支统一使用生产环境（mainnet）的 ProgramId。
-declare_id!("APUks79PsufzDGUTwjt5rh9wcJ6bWnd32u3nCdnAVSMW");
+declare_id!("3e1bXXZBUSHuJK7i2szghnKkSxnQSSwbEgN8QfVPFxxj");
 
 #[program]
 pub mod lp_handler {

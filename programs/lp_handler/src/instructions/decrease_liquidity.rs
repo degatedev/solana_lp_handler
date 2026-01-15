@@ -364,24 +364,54 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
                 slippage_bps,
                 ctx.accounts.amm_config.trade_fee_rate,
             )?;
-            swap_v2(
-                &ctx,
-                reward_other_in,
-                swap_other_amount_threshold,
-                0,
-                input_is_token0,
-                swap_remaining.to_vec(),
-            )?;
-            ctx.accounts.user_token0_account.reload()?;
-            ctx.accounts.user_token1_account.reload()?;
-            let target_balance_after_reward_swap = if target_is_token0 {
-                ctx.accounts.user_token0_account.amount
+
+            // dust 保护：如果预估的最小输出太小，则不执行 swap，直接把 reward_other_in 转给手续费地址
+            if swap_other_amount_threshold == 0 {
+                msg!(
+                    "skip reward swap: amount_out_min {} =0, transfer input to fee",
+                    swap_other_amount_threshold,
+                );
+                transfer_fee(
+                    &ctx.accounts.user,
+                    if input_is_token0 {
+                        &ctx.accounts.user_token0_account
+                    } else {
+                        &ctx.accounts.user_token1_account
+                    },
+                    if input_is_token0 {
+                        &ctx.accounts.fee_token0_account
+                    } else {
+                        &ctx.accounts.fee_token1_account
+                    },
+                    if input_is_token0 {
+                        Some(&ctx.accounts.vault_0_mint)
+                    } else {
+                        Some(&ctx.accounts.vault_1_mint)
+                    },
+                    &ctx.accounts.token_program,
+                    Some(&ctx.accounts.token_program_2022),
+                    reward_other_in,
+                )?;
             } else {
-                ctx.accounts.user_token1_account.amount
-            };
-            reward_out_in_target = target_balance_after_reward_swap
-                .checked_sub(target_balance_before_swap)
-                .ok_or(LpDepositError::MathOverflow)?;
+                swap_v2(
+                    &ctx,
+                    reward_other_in,
+                    swap_other_amount_threshold,
+                    0,
+                    input_is_token0,
+                    swap_remaining.to_vec(),
+                )?;
+                ctx.accounts.user_token0_account.reload()?;
+                ctx.accounts.user_token1_account.reload()?;
+                let target_balance_after_reward_swap = if target_is_token0 {
+                    ctx.accounts.user_token0_account.amount
+                } else {
+                    ctx.accounts.user_token1_account.amount
+                };
+                reward_out_in_target = target_balance_after_reward_swap
+                    .checked_sub(target_balance_before_swap)
+                    .ok_or(LpDepositError::MathOverflow)?;
+            }
         }
 
         // 2) reward 已全部在目标币种：计算并扣 fee（只对 reward 抽成）
@@ -635,7 +665,6 @@ fn swap_v2<'a, 'b, 'c: 'info, 'info>(
 
     let cpi_ctx =
         CpiContext::new(cpi_program.clone(), cpi_accounts).with_remaining_accounts(swap_remaining);
-
     clmm_cpi::swap_v2(
         cpi_ctx,
         swap_amount,

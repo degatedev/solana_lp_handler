@@ -5,7 +5,7 @@ use crate::LpDepositError;
 
 pub fn calc_min_amount_out(
     swap_amount: u64,
-    is_base_input: bool,
+    input_is_token0: bool,
     sqrt_price_x64: u128,
     slippage_bps: u16,
     trade_fee_rate: u32, // Raydium: denominated in hundredths of a bip (10^-6), i.e. 1_000_000 = 100%
@@ -23,7 +23,7 @@ pub fn calc_min_amount_out(
     let slippage_factor = U256::from(10_000u128 - slippage_bps as u128);
     let fee_factor = U256::from(1_000_000u128 - trade_fee_rate as u128); // 10^-6
 
-    let out_before_fee_and_slippage = if is_base_input {
+    let out_before_fee_and_slippage = if input_is_token0 {
         // token0 → token1
         //
         // out = in * price  (price 是 Q64.64，需要右移 64)
@@ -51,7 +51,10 @@ pub fn calc_min_amount_out(
         out <= U256::from(u64::MAX as u128),
         LpDepositError::MathOverflow
     );
-    Ok(out.as_u64())
+    let out = out.as_u64();
+    // 防御：避免 swap 后输出 token 数量过小，导致 Raydium CPI 失败
+    let out = out.checked_sub(100).unwrap_or(0);
+    Ok(out)
 }
 
 /// 对给定 `amount` 应用滑点折扣（bps），返回 `amount * (1 - slippage)` 的结果。

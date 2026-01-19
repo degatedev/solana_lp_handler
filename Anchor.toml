@@ -8,7 +8,7 @@ skip-lint = false
 
 [programs.mainnet]
 # 这里是主网 program id
-lp_handler = "Hvve4SjwNmewh9bBh6VY9mbtomPwqJav6XRuWMLrhpZw"
+lp_handler = "Fo5wRqZVGgJt1qmShvF84yFxRo1jxVwumqJMPUnqpbKH"
 
 [registry]
 url = "https://api.apr.dev"

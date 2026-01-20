@@ -1,6 +1,9 @@
 use anchor_lang::prelude::*;
 use raydium_amm_v3::cpi as clmm_cpi;
 use raydium_amm_v3::cpi::accounts as clmm_accounts;
+use raydium_amm_v3::libraries::{get_sqrt_price_at_tick, liquidity_math, U256};
+use raydium_amm_v3::program::AmmV3;
+use raydium_amm_v3::states::{AmmConfig, ObservationState, PoolState, TickArrayState};
 
 use crate::{utils, IncreaseLiquidityEvent, LpDepositError, SwapExecutedEvent};
 
@@ -8,8 +11,6 @@ use anchor_spl::associated_token::AssociatedToken;
 use anchor_spl::memo::Memo;
 use anchor_spl::token::Token;
 use anchor_spl::token_interface::{Mint, Token2022, TokenAccount};
-use raydium_amm_v3::program::AmmV3;
-use raydium_amm_v3::states::{AmmConfig, ObservationState, PoolState, TickArrayState};
 
 /// swap_and_deposit 所需的所有账户
 /// 包含 swap_v2 和 open_position_v2 的全部账户（有些可以复用，比如 pool_state、token_program 等）
@@ -251,10 +252,9 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
             )?;
         }
         msg!(
-            "Swap params: swap_amount={},min_amount_out={},swap_amount_out={}",
+            "Swap params: swap_amount={},min_amount_out={}",
             swap_amount_min,
             min_amount_out,
-            swap_amount_out
         );
         // 执行 swap
         swap_v2(
@@ -322,19 +322,46 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
         )
     };
 
-    let tick_array_lower_start_index =
-        TickArrayState::get_array_start_index(tick_lower_index, tick_spacing as u16);
-    let tick_array_upper_start_index =
-        TickArrayState::get_array_start_index(tick_upper_index, tick_spacing as u16);
     let base_flag = if amount_0_max == 0 {
         Some(false)
     } else if amount_1_max == 0 {
         Some(true)
-    } else if is_token0 {
-        Some(false)
     } else {
-        Some(true)
+        let sqrt_price_x64 = {
+            let pool_state = ctx.accounts.pool_state.load()?;
+            pool_state.sqrt_price_x64
+        };
+
+        let sqrt_ratio_a_x64 = get_sqrt_price_at_tick(tick_lower_index)?;
+        let sqrt_ratio_b_x64 = get_sqrt_price_at_tick(tick_upper_index)?;
+
+        let liquidity_by_amount_0 = liquidity_math::get_liquidity_from_single_amount_0(
+            sqrt_price_x64,
+            sqrt_ratio_a_x64,
+            sqrt_ratio_b_x64,
+            amount_0_max,
+        );
+        let liquidity_by_amount_1 = liquidity_math::get_liquidity_from_single_amount_0(
+            sqrt_price_x64,
+            sqrt_ratio_a_x64,
+            sqrt_ratio_b_x64,
+            amount_1_max,
+        );
+        msg!(
+            "liquidity_by_amount_0={}, liquidity_by_amount_1={}, amount_0_max={}, amount_1_max={}",
+            liquidity_by_amount_0,
+            liquidity_by_amount_1,
+            amount_0_max,
+            amount_1_max
+        );
+        Some(liquidity_by_amount_0 > liquidity_by_amount_1)
     };
+
+    // if is_token0 {
+    //     Some(false)
+    // } else {
+    //     Some(true)
+    // };
 
     msg!(
         "open_position for LP: amount_0_max={}, amount_1_max={} (deposit_amount={}, swap_amount_in={}, swap_amount_out={}, base_flag={})",
@@ -345,7 +372,10 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
         swap_amount_out,
         base_flag.unwrap()
     );
-
+    let tick_array_lower_start_index =
+        TickArrayState::get_array_start_index(tick_lower_index, tick_spacing as u16);
+    let tick_array_upper_start_index =
+        TickArrayState::get_array_start_index(tick_upper_index, tick_spacing as u16);
     // 7. 添加流动性
     // 注意：这里固定传 0 是“刻意设计”
     // - `liquidity` 参数仅用于上面的 `calculate_optimal_swap_amount` 计算最优兑换比例
@@ -363,6 +393,70 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
         open_position_remaining.to_vec(),
     )?;
 
+    ctx.accounts.user_token0_account.reload()?;
+    ctx.accounts.user_token1_account.reload()?;
+
+    let amount_0_after = ctx.accounts.user_token0_account.amount;
+    let amount_1_after = ctx.accounts.user_token1_account.amount;
+    // 检查剩余币种余额
+    let remaining_amount = if is_token0 {
+        amount_1_after.checked_sub(balance_1_before).unwrap_or(0)
+    } else {
+        amount_0_after.checked_sub(balance_0_before).unwrap_or(0)
+    };
+    if remaining_amount > 0 {
+        let sqrt_price_x64 = {
+            let pool_state = ctx.accounts.pool_state.load()?;
+            pool_state.sqrt_price_x64
+        };
+        let min_amount_out = utils::calc_min_amount_out(
+            remaining_amount,
+            !is_token0,
+            sqrt_price_x64,
+            slippage_bps,
+            ctx.accounts.amm_config.trade_fee_rate,
+        )?;
+        // 执行 swap
+        swap_v2(
+            &ctx,
+            remaining_amount,
+            min_amount_out,
+            0,
+            !is_token0,
+            swap_remaining.to_vec(),
+        )?;
+        msg!(
+            "remaining_amount={}, min_amount_out={}",
+            remaining_amount,
+            min_amount_out
+        );
+    }
+
+    ctx.accounts.user_token0_account.reload()?;
+    ctx.accounts.user_token1_account.reload()?;
+    let amount_0_after = ctx.accounts.user_token0_account.amount;
+    let amount_1_after = ctx.accounts.user_token1_account.amount;
+
+    let return_amount = if is_token0 {
+        let amount_0 = balance_0_before
+            .checked_sub(amount_0_after)
+            .ok_or(LpDepositError::MathOverflow)?;
+        deposit_amount
+            .checked_sub(amount_0)
+            .ok_or(LpDepositError::MathOverflow)?
+    } else {
+        let amount_1 = balance_1_before
+            .checked_sub(amount_1_after)
+            .ok_or(LpDepositError::MathOverflow)?;
+        deposit_amount
+            .checked_sub(amount_1)
+            .ok_or(LpDepositError::MathOverflow)?
+    };
+    msg!(
+        "return_amount={}, deposit_amount={}",
+        return_amount,
+        deposit_amount
+    );
     // 销毁ata账户
 
     // 发出流动性添加事件
@@ -373,6 +467,8 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
         position_nft_mint: ctx.accounts.position_nft_mint.key(),
         amount_0: amount_0_max,
         amount_1: amount_1_max,
+        deposit_amount,
+        return_amount: return_amount,
         token0_mint: ctx.accounts.vault_0_mint.key(),
         token1_mint: ctx.accounts.vault_1_mint.key(),
         tick_lower_index,

@@ -50,6 +50,10 @@ pub struct IncreaseLiquidityEvent {
     pub tick_upper_index: i32,
     /// 流动性值
     pub liquidity: i128,
+    /// 预期投入的数量
+    pub deposit_amount: u64,
+    /// 返回的数量
+    pub return_amount: u64,
 }
 
 #[event]

@@ -8,7 +8,7 @@ use state::*;
 
 // ProgramId 需要与部署的 program keypair 对应的地址一致。
 // 本分支统一使用生产环境（mainnet）的 ProgramId。
-declare_id!("4Uu8F7Jxaa4cFYh2vyA1VLoJ7BzCwgDUrsgEZGCyDTmg");
+declare_id!("7psbYpSbtDVJ2jtbQin11bgR69rAysBNJt1h1FkQABdt");
 
 #[program]
 pub mod lp_handler {
@@ -24,7 +24,8 @@ pub mod lp_handler {
         tick_lower_index: i32,
         tick_upper_index: i32,
         liquidity: i128,
-        slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
+        slippage_bps: u16,    // 滑点，单位为基点 (1 bps = 0.01%)
+        lp_slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
     ) -> Result<()> {
         instructions::swap_and_deposit(
             ctx,
@@ -34,6 +35,7 @@ pub mod lp_handler {
             tick_upper_index,
             liquidity,
             slippage_bps,
+            lp_slippage_bps,
         )
     }
 

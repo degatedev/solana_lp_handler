@@ -1,9 +1,10 @@
 use anchor_lang::prelude::*;
 use raydium_amm_v3::cpi as clmm_cpi;
 use raydium_amm_v3::cpi::accounts as clmm_accounts;
-use raydium_amm_v3::libraries::{get_sqrt_price_at_tick, liquidity_math, U256};
+use raydium_amm_v3::libraries::{get_sqrt_price_at_tick, liquidity_math};
 use raydium_amm_v3::program::AmmV3;
 use raydium_amm_v3::states::{AmmConfig, ObservationState, PoolState, TickArrayState};
+use raydium_amm_v3::util::get_transfer_fee;
 
 use crate::{utils, IncreaseLiquidityEvent, LpDepositError, SwapExecutedEvent};
 
@@ -22,6 +23,7 @@ use anchor_spl::token_interface::{Mint, Token2022, TokenAccount};
     tick_upper_index: i32,
     liquidity:i128,
     slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
+    lp_slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
 )]
 pub struct SwapAndDeposit<'info> {
     // ========== 公共账户 ==========
@@ -155,7 +157,8 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
     tick_lower_index: i32,
     tick_upper_index: i32,
     liquidity: i128,
-    slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
+    slippage_bps: u16,    // 滑点，单位为基点 (1 bps = 0.01%)
+    lp_slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
 ) -> Result<()> {
     let timestamp = Clock::get()?.unix_timestamp;
 
@@ -191,8 +194,7 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
 
     // 3. 读取当前池子状态并计算 swap 数量
     // 注意：需要在 swap 之前保存 tick_spacing，因为 swap 会修改 pool_state
-    let mut swap_amount_min = 0;
-    let (_current_tick, swap_amount_in, swap_amount_out, tick_spacing) = {
+    let (swap_amount_in, swap_amount_out, tick_spacing) = {
         let pool_state = ctx.accounts.pool_state.load()?;
         let current_tick = pool_state.tick_current;
         let tick_spacing = pool_state.tick_spacing;
@@ -207,7 +209,7 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
             pool_state.sqrt_price_x64,
             liquidity,
         )?;
-        (current_tick, swap_amount, swap_amount_out, tick_spacing)
+        (swap_amount, swap_amount_out, tick_spacing)
     };
 
     // 4. 记录 swap 前的余额
@@ -225,6 +227,7 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
     let (swap_remaining, rest) = ctx.remaining_accounts.split_at(sep_index);
     let open_position_remaining = &rest[1..]; // 跳过分隔符本身
 
+    let mut swap_amount_min = 0;
     // 5. 执行 swap（如果需要）
     if swap_amount_in > 0 {
         // 计算最小输出（滑点保护）
@@ -242,7 +245,7 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
         )?;
         swap_amount_min = swap_amount_in;
         if swap_amount_in != deposit_amount {
-            swap_amount_min = utils::apply_slippage_bps_floor(swap_amount_in, slippage_bps)?;
+            swap_amount_min = utils::apply_slippage_bps_floor(swap_amount_in, lp_slippage_bps)?;
             min_amount_out = utils::calc_min_amount_out(
                 swap_amount_min,
                 is_token0,
@@ -327,41 +330,8 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
     } else if amount_1_max == 0 {
         Some(true)
     } else {
-        let sqrt_price_x64 = {
-            let pool_state = ctx.accounts.pool_state.load()?;
-            pool_state.sqrt_price_x64
-        };
-
-        let sqrt_ratio_a_x64 = get_sqrt_price_at_tick(tick_lower_index)?;
-        let sqrt_ratio_b_x64 = get_sqrt_price_at_tick(tick_upper_index)?;
-
-        let liquidity_by_amount_0 = liquidity_math::get_liquidity_from_single_amount_0(
-            sqrt_price_x64,
-            sqrt_ratio_a_x64,
-            sqrt_ratio_b_x64,
-            amount_0_max,
-        );
-        let liquidity_by_amount_1 = liquidity_math::get_liquidity_from_single_amount_0(
-            sqrt_price_x64,
-            sqrt_ratio_a_x64,
-            sqrt_ratio_b_x64,
-            amount_1_max,
-        );
-        msg!(
-            "liquidity_by_amount_0={}, liquidity_by_amount_1={}, amount_0_max={}, amount_1_max={}",
-            liquidity_by_amount_0,
-            liquidity_by_amount_1,
-            amount_0_max,
-            amount_1_max
-        );
-        Some(liquidity_by_amount_0 > liquidity_by_amount_1)
+        Some(true)
     };
-
-    // if is_token0 {
-    //     Some(false)
-    // } else {
-    //     Some(true)
-    // };
 
     msg!(
         "open_position for LP: amount_0_max={}, amount_1_max={} (deposit_amount={}, swap_amount_in={}, swap_amount_out={}, base_flag={})",
@@ -380,13 +350,29 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
     // 注意：这里固定传 0 是“刻意设计”
     // - `liquidity` 参数仅用于上面的 `calculate_optimal_swap_amount` 计算最优兑换比例
     // - 开仓/加流动性时让 Raydium 根据 amount_0_max/amount_1_max 自动计算实际 liquidity
+
+    let sqrt_price_x64 = {
+        let pool_state = ctx.accounts.pool_state.load()?;
+        pool_state.sqrt_price_x64
+    };
+
+    let sqrt_ratio_a_x64 = get_sqrt_price_at_tick(tick_lower_index)?;
+    let sqrt_ratio_b_x64 = get_sqrt_price_at_tick(tick_upper_index)?;
+
+    let l = liquidity_math::get_liquidity_from_amounts(
+        sqrt_price_x64,
+        sqrt_ratio_a_x64,
+        sqrt_ratio_b_x64,
+        amount_0_max,
+        amount_1_max,
+    );
     open_position_with_token22_nft(
         &ctx,
         tick_lower_index,
         tick_upper_index,
         tick_array_lower_start_index,
         tick_array_upper_start_index,
-        0,
+        l,
         amount_0_max,
         amount_1_max,
         base_flag, // base_flag

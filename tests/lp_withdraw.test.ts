@@ -43,6 +43,7 @@ import {
   getTokenAta,
   pool_address,
   program,
+  securityConfig,
   slippage,
   user,
   userWallet
@@ -200,7 +201,8 @@ describe('lp_withdraw', () => {
       vault1Mint: new PublicKey(poolKeys.mintB.address),
       feeToken0Account: feeToken0Account.tokenAccount,
       feeToken1Account: feeToken1Account.tokenAccount,
-      memoProgram: MEMO_PROGRAM_ID
+      memoProgram: MEMO_PROGRAM_ID,
+      securityConfig
     };
     const instruction = await program.methods
       .decreaseLiquidity(position.liquidity, new BN(0), new BN(0), deposit_token_mint, slippage, fee_percent, true)

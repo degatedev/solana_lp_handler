@@ -119,4 +119,26 @@ pub mod lp_handler {
             )
         )
     }
+
+    /// 初始化 pool 白名单 PDA（单例）。
+    /// 注意：该指令本身不走安全三明治包装（因为此时白名单可能尚未创建）。
+    pub fn init_security_config(
+        ctx: Context<InitSecurityConfig>,
+        pools: Vec<Pubkey>,
+    ) -> Result<()> {
+        instructions::init_security_config(ctx, pools)
+    }
+
+    /// 更新 pool 白名单 PDA（仅管理员可更新）。
+    pub fn update_security_config(
+        ctx: Context<UpdateSecurityConfig>,
+        pools: Vec<Pubkey>,
+    ) -> Result<()> {
+        instructions::update_security_config(ctx, pools)
+    }
+
+    /// 关闭 security_config PDA 并回收租金到 receiver。
+    pub fn close_security_config(ctx: Context<CloseSecurityConfig>) -> Result<()> {
+        instructions::close_security_config(ctx)
+    }
 }

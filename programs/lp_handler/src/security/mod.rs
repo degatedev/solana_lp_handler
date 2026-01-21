@@ -6,8 +6,6 @@ use crate::LpDepositError;
 
 #[derive(Clone)]
 pub struct SecurityPolicy {
-    /// 是否启用 pool 白名单（`ALLOWED_POOLS` 非空时启用）
-    pub enforce_pool_whitelist: bool,
     /// 默认禁止 delegate / close_authority（更贴近“不可滞留权限”的安全目标）
     pub forbid_delegate: bool,
     pub forbid_close_authority: bool,
@@ -16,11 +14,39 @@ pub struct SecurityPolicy {
 impl SecurityPolicy {
     pub fn default_for_program() -> Self {
         Self {
-            enforce_pool_whitelist: !crate::ALLOWED_POOLS.is_empty(),
             forbid_delegate: true,
             forbid_close_authority: true,
         }
     }
+}
+
+/// 读取 security_config PDA：
+/// - 若账户未初始化（system owner + data_len=0），返回 None（视为“未启用白名单”，跳过 pool 校验）
+/// - 若已初始化，返回 Some(SecurityConfig)
+fn load_security_config<'info>(
+    accounts: &[AccountInfo<'info>],
+) -> Result<Option<crate::SecurityConfig>> {
+    let (expected, _) = Pubkey::find_program_address(&[crate::SECURITY_CONFIG_SEED], &crate::ID);
+    let ai = accounts
+        .iter()
+        .find(|a| a.key() == expected)
+        .ok_or(LpDepositError::SecurityPoolWhitelistMissing)?;
+
+    // 未初始化：直接跳过白名单校验
+    if is_uninitialized_account(ai) {
+        return Ok(None);
+    }
+
+    require_keys_eq!(
+        *ai.owner,
+        crate::ID,
+        LpDepositError::SecurityPoolWhitelistInvalid
+    );
+    let data = ai.data.borrow();
+    let mut d: &[u8] = &data;
+    let cfg = crate::SecurityConfig::try_deserialize(&mut d)
+        .map_err(|_| error!(LpDepositError::SecurityPoolWhitelistInvalid))?;
+    Ok(Some(cfg))
 }
 
 #[derive(Clone, Debug)]
@@ -227,7 +253,7 @@ pub fn entry_check_and_snapshot<'info>(
     pool_states: &[Pubkey],
     user: Pubkey,
     additional_allowed_token_authorities: &[Pubkey],
-    policy: &SecurityPolicy,
+    _policy: &SecurityPolicy,
 ) -> Result<SecuritySnapshot> {
     // remaining_accounts 分隔符（crate::ID）约束：若出现，则必须唯一、只读
     let sep_cnt = remaining_accounts
@@ -260,13 +286,15 @@ pub fn entry_check_and_snapshot<'info>(
         }
     }
 
-    // Pool 白名单（由入口显式传入需要校验的 pool_state 列表）
-    if policy.enforce_pool_whitelist {
-        for p in pool_states.iter() {
-            require!(
-                crate::ALLOWED_POOLS.iter().any(|k| k == p),
-                LpDepositError::SecurityPoolNotAllowed
-            );
+    // Pool 白名单：
+    // - 必须提供 security_config PDA（账户需在列表中）
+    // - 若 PDA 尚未初始化，跳过校验
+    // - 若已初始化但 pools 为空，视为“未启用白名单”，跳过校验
+    if let Some(cfg) = load_security_config(accounts)? {
+        if !cfg.pools.is_empty() {
+            for p in pool_states.iter() {
+                require!(cfg.contains(p), LpDepositError::SecurityPoolNotAllowed);
+            }
         }
     }
 

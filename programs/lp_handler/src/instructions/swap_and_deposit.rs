@@ -5,7 +5,9 @@ use raydium_amm_v3::libraries::{get_sqrt_price_at_tick, liquidity_math};
 use raydium_amm_v3::program::AmmV3;
 use raydium_amm_v3::states::{AmmConfig, ObservationState, PoolState, TickArrayState};
 
-use crate::{utils, IncreaseLiquidityEvent, LpDepositError, SwapExecutedEvent};
+use crate::{
+    utils, IncreaseLiquidityEvent, LpDepositError, SwapExecutedEvent, SECURITY_CONFIG_SEED,
+};
 
 use anchor_spl::associated_token::AssociatedToken;
 use anchor_spl::memo::Memo;
@@ -117,6 +119,15 @@ pub struct SwapAndDeposit<'info> {
 
     /// Program to create NFT mint/token account and transfer for token22 account
     pub token_program_2022: Program<'info, Token2022>,
+
+    /// CHECK: 通用安全配置 PDA（必须传入），允许“未初始化”的 system-owned 空账户。
+    /// - 地址通过 seeds+bump 校验为固定 PDA
+    /// - 是否初始化由安全层在运行时判断；未初始化时跳过 pool 白名单校验
+    #[account(
+        seeds = [SECURITY_CONFIG_SEED],
+        bump
+    )]
+    pub security_config: UncheckedAccount<'info>,
 
     /// The mint of token vault 0
     #[account(

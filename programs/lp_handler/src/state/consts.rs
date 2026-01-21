@@ -10,8 +10,20 @@ pub const FEE_OWNERS: &[Pubkey] = &[
     pubkey!("5supVqBoki4jARg3EFjFgpP84mXs6PgC2nUwae3iTDcE"), // stg
 ];
 
+/// 安全配置（security_config PDA）的管理员（写死在程序内）
+///
+/// 说明：当前仅使用单一管理员地址；如需按 devnet/mainnet 切换，可在此处加 `#[cfg(feature = \"devnet\")]` 分支。
+pub mod admin {
+    use super::{pubkey, Pubkey};
+    pub const ID: Pubkey = pubkey!("CB5HJVasNzZ7nWJHJTvuiKm4vF9yb5YFqc9jnnPScKpB");
+}
+
 pub fn is_fee_owner(owner: &Pubkey) -> bool {
     FEE_OWNERS.iter().any(|k| k == owner)
+}
+
+pub fn is_admin(owner: &Pubkey) -> bool {
+    owner == &admin::ID
 }
 
 // -----------------------------

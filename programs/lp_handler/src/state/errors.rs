@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 
-#[error_code]
+#[error_code(offset = 4000)]
 pub enum LpDepositError {
     #[msg("Math operation overflow")]
     MathOverflow,
@@ -50,14 +50,17 @@ pub enum LpDepositError {
     #[msg("Pool 不在允许列表：pool_state 未在 ALLOWED_POOLS 白名单中")]
     SecurityPoolNotAllowed,
 
-    #[msg("Token mint 不在允许列表：Token-2022 mint 未在 ALLOWED_TOKEN2022_MINTS 白名单中")]
-    SecurityTokenMintNotAllowed,
+    #[msg("安全配置 PDA 缺失：必须在账户列表中提供 security_config PDA")]
+    SecurityPoolWhitelistMissing,
+
+    #[msg("安全配置 PDA 无效：owner 不是本程序或反序列化失败")]
+    SecurityPoolWhitelistInvalid,
+
+    #[msg("安全配置管理员校验失败：authority 不是 admin")]
+    SecurityConfigAdminUnauthorized,
 
     #[msg("Token-2022 mint 含高风险扩展（如 PermanentDelegate/TransferHook/Confidential/NonTransferable），已拒绝")]
     SecurityToken2022ForbiddenExtension,
-
-    #[msg("缺少 Token-2022 mint 账户：无法读取扩展做风控（开启 Token-2022 白名单模式时必须把 mint account 传入）")]
-    SecurityMissingToken2022MintAccount,
 
     #[msg("黑名单命中：检测到被拉黑的地址作为 user/authority/delegate/close_authority")]
     SecurityBlacklistedUser,

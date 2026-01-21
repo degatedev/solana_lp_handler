@@ -41,6 +41,7 @@ import {
   getTokenAta,
   pool_address,
   program,
+  securityConfig,
   slippage,
   user,
   userWallet
@@ -145,7 +146,7 @@ describe('lp_claim', () => {
       PoolUtils.isOverflowDefaultTickarrayBitmap(poolInfo.config.tickSpacing, [
         tickArrayLowerStartIndex,
         tickArrayUpperStartIndex
-      ])
+      ])&&tickArrayBitmapExtension
     ) {
       remainingAccounts.push({
         pubkey: tickArrayBitmapExtension,
@@ -206,7 +207,8 @@ describe('lp_claim', () => {
       vault1Mint: new PublicKey(poolKeys.mintB.address),
       feeToken0Account: feeToken0Account.tokenAccount,
       feeToken1Account: feeToken1Account.tokenAccount,
-      memoProgram: MEMO_PROGRAM_ID
+      memoProgram: MEMO_PROGRAM_ID,
+      securityConfig
     };
     console.log('accounts', JSON.stringify(accounts, null, 2));
     const instruction = await program.methods

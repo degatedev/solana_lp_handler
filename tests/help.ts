@@ -100,3 +100,5 @@ export const startPrice = 431;
 export const endPrice = 522;
 export const fee_address = new PublicKey('E32ykUTbi4Ag8t4Hic41HtDVwAZca1oGorqvkt3YS7Dy');
 export const fee_percent = 1200;
+
+export const securityConfig = PublicKey.findProgramAddressSync([Buffer.from('security_config')], program.programId)[0]

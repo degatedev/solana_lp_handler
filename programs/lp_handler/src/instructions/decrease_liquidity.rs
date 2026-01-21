@@ -6,7 +6,7 @@ use anchor_spl::token_2022::{self, Token2022};
 use anchor_spl::token_interface::{Mint, TokenAccount};
 use raydium_amm_v3::program::AmmV3;
 
-use crate::{is_fee_owner, utils, DecreaseLiquidityEvent, LpDepositError};
+use crate::{is_fee_owner, utils, DecreaseLiquidityEvent, LpDepositError, SECURITY_CONFIG_SEED};
 use raydium_amm_v3::cpi as clmm_cpi;
 use raydium_amm_v3::cpi::accounts as clmm_accounts;
 use raydium_amm_v3::states::{
@@ -88,6 +88,15 @@ pub struct DecreaseLiquidity<'info> {
 
     /// Program to create NFT mint/token account and transfer for token22 account
     pub token_program_2022: Program<'info, Token2022>,
+
+    /// CHECK: 通用安全配置 PDA（必须传入），允许“未初始化”的 system-owned 空账户。
+    /// - 地址通过 seeds+bump 校验为固定 PDA
+    /// - 是否初始化由安全层在运行时判断；未初始化时跳过 pool 白名单校验
+    #[account(
+        seeds = [SECURITY_CONFIG_SEED],
+        bump
+    )]
+    pub security_config: UncheckedAccount<'info>,
 
     pub memo_program: Program<'info, Memo>,
 

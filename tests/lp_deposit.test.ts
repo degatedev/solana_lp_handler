@@ -38,6 +38,7 @@ import {
   getTokenAta,
   pool_address,
   program,
+  securityConfig,
   slippage,
   startPrice,
   user,
@@ -146,8 +147,29 @@ describe('lp_deposit', () => {
         isWritable: true
       });
     });
+    remainingAccounts.push({
+      pubkey: program.programId,
+      isSigner: false,
+      isWritable: false
+    });
 
-    console.log('CLMM_PROGRAM_ID', CLMM_PROGRAM_ID);
+    const tickArrayLowerStartIndex = TickUtils.getTickArrayStartIndexByTick(tickLower, poolInfo.config.tickSpacing);
+    const tickArrayUpperStartIndex = TickUtils.getTickArrayStartIndexByTick(tickUpper, poolInfo.config.tickSpacing);
+
+    if (
+      PoolUtils.isOverflowDefaultTickarrayBitmap(poolInfo.config.tickSpacing, [
+        tickArrayLowerStartIndex,
+        tickArrayUpperStartIndex
+      ]) &&
+      tickArrayBitmapExtension
+    ) {
+      remainingAccounts.push({
+        pubkey: tickArrayBitmapExtension,
+        isSigner: false,
+        isWritable: true
+      });
+    }
+
     const accounts = {
       raydiumClmmProgram: CLMM_PROGRAM_ID,
       memoProgram: MEMO_PROGRAM_ID,
@@ -172,7 +194,8 @@ describe('lp_deposit', () => {
       tokenVault0: new PublicKey(poolKeys.vault.A),
       tokenVault1: new PublicKey(poolKeys.vault.B),
       vault0Mint: new PublicKey(poolKeys.mintA.address),
-      vault1Mint: new PublicKey(poolKeys.mintB.address)
+      vault1Mint: new PublicKey(poolKeys.mintB.address),
+      securityConfig
     };
     console.log(
       'accounts',
@@ -186,7 +209,7 @@ describe('lp_deposit', () => {
       )
     );
     const instruction = await program.methods
-      .swapAndDeposit(new BN(deposit_amount), deposit_token_mint, tickLower, tickUpper, res2.liquidity, slippage)
+      .swapAndDeposit(new BN(deposit_amount), deposit_token_mint, tickLower, tickUpper, res2.liquidity, slippage,slippage)
       .accountsStrict(accounts)
       .remainingAccounts(remainingAccounts)
       .instruction();

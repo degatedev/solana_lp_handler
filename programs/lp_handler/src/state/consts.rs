@@ -51,6 +51,3 @@ pub const ALLOWED_POOLS: &[Pubkey] = &[
 
 /// 黑名单用户（空 = 不限制）
 pub const USER_BLACKLIST: &[Pubkey] = &[];
-
-/// 允许的 Token-2022 mint（空 = 不限制；仍会做扩展风险检查）
-pub const ALLOWED_TOKEN2022_MINTS: &[Pubkey] = &[];

@@ -8,8 +8,6 @@ use crate::LpDepositError;
 pub struct SecurityPolicy {
     /// 是否启用 pool 白名单（`ALLOWED_POOLS` 非空时启用）
     pub enforce_pool_whitelist: bool,
-    /// 是否启用 Token-2022 mint 白名单（`ALLOWED_TOKEN2022_MINTS` 非空时启用）
-    pub enforce_token2022_mint_whitelist: bool,
     /// 默认禁止 delegate / close_authority（更贴近“不可滞留权限”的安全目标）
     pub forbid_delegate: bool,
     pub forbid_close_authority: bool,
@@ -19,7 +17,6 @@ impl SecurityPolicy {
     pub fn default_for_program() -> Self {
         Self {
             enforce_pool_whitelist: !crate::ALLOWED_POOLS.is_empty(),
-            enforce_token2022_mint_whitelist: !crate::ALLOWED_TOKEN2022_MINTS.is_empty(),
             forbid_delegate: true,
             forbid_close_authority: true,
         }
@@ -286,24 +283,12 @@ pub fn entry_check_and_snapshot<'info>(
         }
     }
 
-    // 若启用 Token-2022 mint 白名单：要求 mint 在白名单中
-    if policy.enforce_token2022_mint_whitelist {
-        for m in involved_token2022_mints.iter() {
-            require!(
-                crate::ALLOWED_TOKEN2022_MINTS.iter().any(|k| k == m),
-                LpDepositError::SecurityTokenMintNotAllowed
-            );
-        }
-    }
-
-    // Token-2022 风险扩展检查：要求能在账户集合中读到 mint account
+    // Token-2022 风险扩展检查（能读到 mint account 就检查；读不到则跳过，不做 mint 白名单限制）
     for mint_key in involved_token2022_mints.iter() {
-        let mut found_mint_account = false;
         for ai in accounts.iter() {
             if ai.key() != *mint_key {
                 continue;
             }
-            found_mint_account = true;
             let Some(m) = parse_token2022_mint(ai) else {
                 continue;
             };
@@ -313,10 +298,6 @@ pub fn entry_check_and_snapshot<'info>(
                     LpDepositError::SecurityToken2022ForbiddenExtension
                 );
             }
-        }
-        if !found_mint_account && policy.enforce_token2022_mint_whitelist {
-            // 开启 Token-2022 白名单模式时，要求传入 mint account 以做扩展风控
-            return err!(LpDepositError::SecurityMissingToken2022MintAccount);
         }
     }
 

@@ -4,7 +4,6 @@ use raydium_amm_v3::cpi::accounts as clmm_accounts;
 use raydium_amm_v3::libraries::{get_sqrt_price_at_tick, liquidity_math};
 use raydium_amm_v3::program::AmmV3;
 use raydium_amm_v3::states::{AmmConfig, ObservationState, PoolState, TickArrayState};
-use raydium_amm_v3::util::get_transfer_fee;
 
 use crate::{utils, IncreaseLiquidityEvent, LpDepositError, SwapExecutedEvent};
 

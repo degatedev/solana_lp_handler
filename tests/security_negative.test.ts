@@ -16,7 +16,7 @@ import {
 } from '@raydium-io/raydium-sdk-v2';
 import { TOKEN_PROGRAM_ID } from '@coral-xyz/anchor/dist/cjs/utils/token';
 import { ASSOCIATED_TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from '@solana/spl-token';
-import { connection, deposit_token_mint, fee_address, fee_percent, getPoolInfo, getPoolKeys, getRaydium, getTickArray, program, slippage, user, userWallet, deposit_amount, pool_address, getTokenAta } from './help';
+import { connection, deposit_token_mint, fee_address, fee_percent, getPoolInfo, getPoolKeys, getRaydium, getTickArray, program, slippage, user, userWallet, deposit_amount, pool_address, getTokenAta, securityConfig } from './help';
 
 // 两个负向用例：
 // 1) remaining_accounts 注入未允许的 executable program account => 安全层应拒绝
@@ -112,7 +112,8 @@ describe('security_negative', () => {
       protocolPosition,
       personalPosition: personalPosition.publicKey,
       tickArrayLower,
-      tickArrayUpper
+      tickArrayUpper,
+      securityConfig
     };
 
     return await program.methods

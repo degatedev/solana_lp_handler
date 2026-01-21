@@ -1,5 +1,5 @@
 import { ComputeBudgetProgram, PublicKey, SystemProgram, TransactionMessage, VersionedTransaction } from '@solana/web3.js';
-import { connection, pool_address, program, securityConfig, user, userWallet } from './help';
+import { connection, pool_address, pools, program, securityConfig, user, userWallet } from './help';
 
 describe('pool_whitelist', () => {
   it('builds init_pool_whitelist and update_pool_whitelist instructions (and simulate)', async () => {
@@ -7,7 +7,7 @@ describe('pool_whitelist', () => {
     // 说明：这里用 any 绕过 target/types 未及时更新导致的 TS 类型问题；
     // 运行前请确保你已 anchor build 生成最新 IDL/types。
     const initIx = await program.methods
-      .initSecurityConfig([pool_address])
+      .initSecurityConfig(pools)
       .accountsStrict({
         authority: user,
         securityConfig,
@@ -16,7 +16,7 @@ describe('pool_whitelist', () => {
       .instruction();
 
     const updateIx = await program.methods
-      .updateSecurityConfig([pool_address])
+      .updateSecurityConfig(pools)
       .accountsStrict({
         authority: user,
         securityConfig,

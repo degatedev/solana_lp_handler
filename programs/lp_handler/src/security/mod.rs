@@ -25,7 +25,7 @@ impl SecurityPolicy {
 /// - 若已初始化，返回 Some(SecurityConfig)
 fn load_security_config<'info>(
     accounts: &[AccountInfo<'info>],
-) -> Result<Option<crate::SecurityConfig>> {
+) -> Result<Option<AccountInfo<'info>>> {
     let (expected, _) = Pubkey::find_program_address(&[crate::SECURITY_CONFIG_SEED], &crate::ID);
     let ai = accounts
         .iter()
@@ -42,11 +42,7 @@ fn load_security_config<'info>(
         crate::ID,
         LpDepositError::SecurityPoolWhitelistInvalid
     );
-    let data = ai.data.borrow();
-    let mut d: &[u8] = &data;
-    let cfg = crate::SecurityConfig::try_deserialize(&mut d)
-        .map_err(|_| error!(LpDepositError::SecurityPoolWhitelistInvalid))?;
-    Ok(Some(cfg))
+    Ok(Some(ai.clone()))
 }
 
 #[derive(Clone, Debug)]
@@ -58,16 +54,6 @@ pub struct TokenAccountSnapshot {
     pub amount: u64,
     pub delegate: Option<Pubkey>,
     pub close_authority: Option<Pubkey>,
-}
-
-#[derive(Clone, Debug)]
-pub struct MintSnapshot {
-    pub token_program: Pubkey,
-    pub decimals: u8,
-    pub mint_authority: Option<Pubkey>,
-    pub freeze_authority: Option<Pubkey>,
-    pub supply: u64,
-    pub token2022_extensions: Vec<Token2022ExtensionType>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -172,35 +158,6 @@ fn map_token2022_extension(
     }
 }
 
-fn parse_token2022_mint(ai: &AccountInfo) -> Option<MintSnapshot> {
-    if ai.owner != &anchor_spl::token_2022::ID {
-        return None;
-    }
-    let data = ai.data.borrow();
-    let state = anchor_spl::token_2022::spl_token_2022::extension::StateWithExtensions::<
-        anchor_spl::token_2022::spl_token_2022::state::Mint,
-    >::unpack(&data)
-    .ok()?;
-
-    let ext_types = state
-        .get_extension_types()
-        .ok()
-        .unwrap_or_default()
-        .into_iter()
-        .map(map_token2022_extension)
-        .collect::<Vec<_>>();
-
-    let mint = state.base;
-    Some(MintSnapshot {
-        token_program: anchor_spl::token_2022::ID,
-        decimals: mint.decimals,
-        mint_authority: mint.mint_authority.into(),
-        freeze_authority: mint.freeze_authority.into(),
-        supply: mint.supply,
-        token2022_extensions: ext_types,
-    })
-}
-
 fn is_forbidden_token2022_extension(t: Token2022ExtensionType) -> bool {
     matches!(
         t,
@@ -212,14 +169,57 @@ fn is_forbidden_token2022_extension(t: Token2022ExtensionType) -> bool {
 }
 
 fn dedup_accounts<'info>(accounts: Vec<AccountInfo<'info>>) -> Vec<AccountInfo<'info>> {
-    let mut seen = std::collections::BTreeSet::new();
-    let mut out = Vec::with_capacity(accounts.len());
+    // 重要：SBF 堆内存非常小（约 32KB），BTreeSet/BTreeMap 会产生大量堆节点分配，易触发 OOM。
+    // 这里改成“线性去重”：仅用一个 Pubkey Vec 记录 seen，O(n^2) 但 n 通常很小（几十个账户），且更省内存。
+    let mut seen: Vec<Pubkey> = Vec::with_capacity(accounts.len());
+    let mut out: Vec<AccountInfo<'info>> = Vec::with_capacity(accounts.len());
     for a in accounts {
-        if seen.insert(a.key()) {
+        let k = a.key();
+        if !seen.iter().any(|x| x == &k) {
+            seen.push(k);
             out.push(a);
         }
     }
     out
+}
+
+fn security_config_pools_len(data: &[u8]) -> Result<usize> {
+    // Anchor discriminator(8) + authority(32) + Vec len(u32=4) + pools
+    const HEADER: usize = 8 + 32 + 4;
+    if data.len() < HEADER {
+        return err!(LpDepositError::SecurityPoolWhitelistInvalid);
+    }
+    let len_bytes: [u8; 4] = data[8 + 32..8 + 32 + 4]
+        .try_into()
+        .map_err(|_| error!(LpDepositError::SecurityPoolWhitelistInvalid))?;
+    let n = u32::from_le_bytes(len_bytes) as usize;
+    require!(
+        n <= crate::MAX_ALLOWED_POOLS,
+        LpDepositError::SecurityPoolWhitelistInvalid
+    );
+    let need = HEADER
+        .checked_add(
+            n.checked_mul(32)
+                .ok_or(LpDepositError::SecurityPoolWhitelistInvalid)?,
+        )
+        .ok_or(LpDepositError::SecurityPoolWhitelistInvalid)?;
+    require!(
+        data.len() >= need,
+        LpDepositError::SecurityPoolWhitelistInvalid
+    );
+    Ok(n)
+}
+
+fn security_config_contains(data: &[u8], n: usize, key: &Pubkey) -> bool {
+    let start = 8 + 32 + 4;
+    let kb = key.as_ref();
+    for i in 0..n {
+        let off = start + i * 32;
+        if data[off..off + 32] == *kb {
+            return true;
+        }
+    }
+    false
 }
 
 pub fn collect_accounts_to_check<'info>(
@@ -290,10 +290,15 @@ pub fn entry_check_and_snapshot<'info>(
     // - 必须提供 security_config PDA（账户需在列表中）
     // - 若 PDA 尚未初始化，跳过校验
     // - 若已初始化但 pools 为空，视为“未启用白名单”，跳过校验
-    if let Some(cfg) = load_security_config(accounts)? {
-        if !cfg.pools.is_empty() {
+    if let Some(cfg_ai) = load_security_config(accounts)? {
+        let data = cfg_ai.data.borrow();
+        let n = security_config_pools_len(&data)?;
+        if n != 0 {
             for p in pool_states.iter() {
-                require!(cfg.contains(p), LpDepositError::SecurityPoolNotAllowed);
+                require!(
+                    security_config_contains(&data, n, p),
+                    LpDepositError::SecurityPoolNotAllowed
+                );
             }
         }
     }
@@ -317,10 +322,19 @@ pub fn entry_check_and_snapshot<'info>(
             if ai.key() != *mint_key {
                 continue;
             }
-            let Some(m) = parse_token2022_mint(ai) else {
+            if ai.owner != &anchor_spl::token_2022::ID {
+                continue;
+            }
+            let data = ai.data.borrow();
+            let Ok(state) = anchor_spl::token_2022::spl_token_2022::extension::StateWithExtensions::<
+                anchor_spl::token_2022::spl_token_2022::state::Mint,
+            >::unpack(&data) else {
                 continue;
             };
-            for ext in m.token2022_extensions.iter().copied() {
+            // 注意：get_extension_types() 本身会返回一个 Vec，但我们避免二次 collect/映射产生额外 Vec。
+            let ext_types = state.get_extension_types().ok().unwrap_or_default();
+            for raw in ext_types.into_iter() {
+                let ext = map_token2022_extension(raw);
                 require!(
                     !is_forbidden_token2022_extension(ext),
                     LpDepositError::SecurityToken2022ForbiddenExtension

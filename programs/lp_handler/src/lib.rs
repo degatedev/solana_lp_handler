@@ -12,7 +12,7 @@ use state::*;
 
 // ProgramId 需要与部署的 program keypair 对应的地址一致。
 // 本分支统一使用生产环境（mainnet）的 ProgramId。
-declare_id!("jQcuBroqSE5Gddwnsae5h7E3gnKwMMTGuLyGCASo6AW");
+declare_id!("egtpTBeAYwAZo2EKGeFG26J3AdueVEjh27cADUPWURB");
 
 #[program]
 #[allow(deprecated)]

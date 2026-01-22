@@ -105,7 +105,6 @@ export const securityConfig = PublicKey.findProgramAddressSync([Buffer.from('sec
 
 
 
-
 export const pools =[
   new PublicKey('HHQUnUbmWLrYzkscDY1C3deEFbGtiGBGoHjpANogmvum'), // TSLAx-USDC
   new PublicKey('CKwJZwm7oj3nu4653N1EpDrqXbXAYXoPFiPeEnLouF8y') ,//AAPLx-USDC
@@ -117,5 +116,7 @@ export const pools =[
   new PublicKey('RyhF4cksVZY7vcqJpoytHcxcGNKRp27PEGhSnEPpbGv'), // MSTRx-USDC
   new PublicKey('7sHMnvE7WqP7vQFWJGEnMT4vZg6Za9K7PpddDoXJCqME'), // SPYx-USDC
   new PublicKey('B8YAwjGYk6qidWzGBXMAxP7nYfG8g74EZ3Y4gFSsobRw'), // GOOGLx
+  new PublicKey('FknDV1F5n6QaA7rLmjquDjuU6wcPMNm5RYq7zWbqhpZw'), // QQQx-USDC
+  new PublicKey('3L7KbPVaAQA4UTecaGQYsm6UCq5F3sZM9zAYkxqYt63j'), // Meta-USDC
   new PublicKey('FknDV1F5n6QaA7rLmjquDjuU6wcPMNm5RYq7zWbqhpZw'), // QQQx-USDC
 ]

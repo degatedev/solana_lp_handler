@@ -3,6 +3,8 @@
 # 本分支统一使用主网（生产）配置
 npm run  deploy
 
+#关闭合约之前执行 安全配置账户回收租金
+
 # 关闭合约
 solana program close egtpTBeAYwAZo2EKGeFG26J3AdueVEjh27cADUPWURB --recipient CB5HJVasNzZ7nWJHJTvuiKm4vF9yb5YFqc9jnnPScKpB --bypass-warning
 

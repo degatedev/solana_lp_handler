@@ -3,7 +3,9 @@ use raydium_amm_v3::cpi as clmm_cpi;
 use raydium_amm_v3::cpi::accounts as clmm_accounts;
 use raydium_amm_v3::libraries::{get_sqrt_price_at_tick, liquidity_math};
 use raydium_amm_v3::program::AmmV3;
-use raydium_amm_v3::states::{AmmConfig, ObservationState, PoolState, TickArrayState};
+use raydium_amm_v3::states::{
+    AmmConfig, ObservationState, PersonalPositionState, PoolState, TickArrayState,
+};
 
 use crate::{
     utils, IncreaseLiquidityEvent, LpDepositError, SwapExecutedEvent, SECURITY_CONFIG_SEED,
@@ -14,7 +16,7 @@ use anchor_spl::memo::Memo;
 use anchor_spl::token::Token;
 use anchor_spl::token_interface::{Mint, Token2022, TokenAccount};
 
-/// swap_and_deposit 所需的所有账户
+/// increase_liquidity 所需的所有账户
 /// 包含 swap_v2 和 open_position_v2 的全部账户（有些可以复用，比如 pool_state、token_program 等）
 #[derive(Accounts)]
 #[instruction(
@@ -26,10 +28,9 @@ use anchor_spl::token_interface::{Mint, Token2022, TokenAccount};
     slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
     lp_slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
 )]
-pub struct SwapAndDeposit<'info> {
+pub struct IncreaseLiquidity<'info> {
     // ========== 公共账户 ==========
     /// Raydium CLMM program (主网: CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK)
-    /// CHECK: 前端传入 Raydium CLMM programId
     #[account(address = raydium_amm_v3::ID)]
     pub raydium_clmm_program: Program<'info, AmmV3>,
 
@@ -37,7 +38,28 @@ pub struct SwapAndDeposit<'info> {
     #[account(mut)]
     pub user: Signer<'info>,
 
-    /// AMM 配置账户（swap 和 position 都需要通过 pool_state 关联）
+    /// Increase liquidity for this position
+    #[account(mut, constraint = personal_position.pool_id == pool_state.key())]
+    pub personal_position: Box<Account<'info, PersonalPositionState>>,
+
+    #[account(
+        constraint = position_nft_account.mint == personal_position.nft_mint,
+        constraint = position_nft_account.amount == 1,
+        token::authority = user
+    )]
+    pub position_nft_account: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    /// CHECK: Deprecated: protocol_position is deprecated and kept for compatibility.
+    pub protocol_position: UncheckedAccount<'info>,
+
+    /// Stores init state for the lower tick
+    #[account(mut, constraint = tick_array_lower.load()?.pool_id == pool_state.key())]
+    pub tick_array_lower: AccountLoader<'info, TickArrayState>,
+
+    /// Stores init state for the upper tick
+    #[account(mut, constraint = tick_array_upper.load()?.pool_id == pool_state.key())]
+    pub tick_array_upper: AccountLoader<'info, TickArrayState>,
+
     #[account(address = pool_state.load()?.amm_config)]
     pub amm_config: Box<Account<'info, AmmConfig>>,
 
@@ -61,33 +83,7 @@ pub struct SwapAndDeposit<'info> {
     )]
     pub user_token1_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
-    /// CHECK: Receives the position NFT
-    pub position_nft_owner: UncheckedAccount<'info>,
-
-    /// Unique token mint address, initialize in contract
-    #[account(mut)]
-    pub position_nft_mint: Signer<'info>,
-
-    /// CHECK: ATA address where position NFT will be minted, initialize in contract
-    #[account(mut)]
-    pub position_nft_account: UncheckedAccount<'info>,
-
-    /// CHECK: Deprecated: protocol_position is deprecated and kept for compatibility.
-    pub protocol_position: UncheckedAccount<'info>,
-
-    /// CHECK: TickArray PDA account used by Raydium CLMM; checked/derived by the Raydium CLMM program during CPI.
-    #[account(mut)]
-    pub tick_array_lower: UncheckedAccount<'info>,
-
-    /// CHECK: TickArray PDA account used by Raydium CLMM; checked/derived by the Raydium CLMM program during CPI.
-    #[account(mut)]
-    pub tick_array_upper: UncheckedAccount<'info>,
-
     pub memo_program: Program<'info, Memo>,
-
-    /// CHECK: Personal position state account, validated by Raydium CLMM program
-    #[account(mut)]
-    pub personal_position: UncheckedAccount<'info>,
 
     /// The address that holds pool tokens for token_0
     #[account(
@@ -156,10 +152,10 @@ pub struct SwapAndDeposit<'info> {
     //
 }
 
-/// 先调用 Raydium swap_v2 换币，再调用 open_position_v2 开仓添加流动性
+/// 先调用 Raydium swap_v2 换币，再调用 increase_liquidity 开仓添加流动性
 /// 使用 Raydium 的 liquidity_math 精确计算最优 swap 比例
-pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
-    ctx: Context<'a, 'b, 'c, 'info, SwapAndDeposit<'info>>,
+pub fn increase_liquidity<'a, 'b, 'c: 'info, 'info>(
+    ctx: Context<'a, 'b, 'c, 'info, IncreaseLiquidity<'info>>,
     deposit_amount: u64,
     deposit_mint: Pubkey,
     tick_lower_index: i32,
@@ -175,19 +171,6 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
         tick_lower_index < tick_upper_index,
         LpDepositError::InvalidTickRange
     );
-    // 校验 position_nft_account 必须是 (position_nft_owner, position_nft_mint, Token2022) 的 ATA 地址
-    // 注意：该 ATA 可能尚未初始化（由下游 CPI 创建），因此只校验地址本身，不校验 owner/program。
-    let expected_position_nft_ata = utils::derive_ata_address(
-        &ctx.accounts.position_nft_owner.key(),
-        &ctx.accounts.position_nft_mint.key(),
-        &ctx.accounts.token_program_2022.key(),
-        &ctx.accounts.associated_token_program.key(),
-    );
-    require_keys_eq!(
-        ctx.accounts.position_nft_account.key(),
-        expected_position_nft_ata,
-        LpDepositError::InvalidPositionNftAccount
-    );
 
     // 1. 校验存入的 mint 是否为池子的 token0 或 token1
     require!(
@@ -202,10 +185,9 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
 
     // 3. 读取当前池子状态并计算 swap 数量
     // 注意：需要在 swap 之前保存 tick_spacing，因为 swap 会修改 pool_state
-    let (swap_amount_in, swap_amount_out, tick_spacing) = {
+    let (swap_amount_in, swap_amount_out) = {
         let pool_state = ctx.accounts.pool_state.load()?;
         let current_tick = pool_state.tick_current;
-        let tick_spacing = pool_state.tick_spacing;
 
         // 使用 Raydium liquidity_math 计算最优 swap 数量
         let (swap_amount, swap_amount_out) = utils::calculate_optimal_swap_amount(
@@ -217,7 +199,7 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
             pool_state.sqrt_price_x64,
             liquidity,
         )?;
-        (swap_amount, swap_amount_out, tick_spacing)
+        (swap_amount, swap_amount_out)
     };
 
     // 4. 记录 swap 前的余额
@@ -233,7 +215,7 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
         .ok_or(LpDepositError::InvalidRemainingAccounts)?;
 
     let (swap_remaining, rest) = ctx.remaining_accounts.split_at(sep_index);
-    let open_position_remaining = &rest[1..]; // 跳过分隔符本身
+    let increase_liquidity_remaining = &rest[1..]; // 跳过分隔符本身
 
     let mut swap_amount_min = 0;
     // 5. 执行 swap（如果需要）
@@ -350,10 +332,6 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
         swap_amount_out,
         base_flag.unwrap()
     );
-    let tick_array_lower_start_index =
-        TickArrayState::get_array_start_index(tick_lower_index, tick_spacing as u16);
-    let tick_array_upper_start_index =
-        TickArrayState::get_array_start_index(tick_upper_index, tick_spacing as u16);
     // 7. 添加流动性
     // 注意：这里固定传 0 是“刻意设计”
     // - `liquidity` 参数仅用于上面的 `calculate_optimal_swap_amount` 计算最优兑换比例
@@ -374,17 +352,13 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
         amount_0_max,
         amount_1_max,
     );
-    open_position_with_token22_nft(
+    increase_liquidity_v2(
         &ctx,
-        tick_lower_index,
-        tick_upper_index,
-        tick_array_lower_start_index,
-        tick_array_upper_start_index,
         l,
         amount_0_max,
         amount_1_max,
         base_flag, // base_flag
-        open_position_remaining.to_vec(),
+        increase_liquidity_remaining.to_vec(),
     )?;
 
     ctx.accounts.user_token0_account.reload()?;
@@ -458,7 +432,7 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
         timestamp,
         user: ctx.accounts.user.key(),
         pool: ctx.accounts.pool_state.key(),
-        position_nft_mint: Some(ctx.accounts.position_nft_mint.key()),
+        position_nft_mint: None,
         amount_0: amount_0_max,
         amount_1: amount_1_max,
         deposit_amount,
@@ -474,7 +448,7 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
 }
 
 fn swap_v2<'a, 'b, 'c: 'info, 'info>(
-    ctx: &Context<'a, 'b, 'c, 'info, SwapAndDeposit<'info>>,
+    ctx: &Context<'a, 'b, 'c, 'info, IncreaseLiquidity<'info>>,
     swap_amount: u64,
     swap_other_amount_threshold: u64,
     sqrt_price_limit_x64: u128,
@@ -548,27 +522,21 @@ fn swap_v2<'a, 'b, 'c: 'info, 'info>(
     Ok(())
 }
 
-fn open_position_with_token22_nft<'a, 'b, 'c: 'info, 'info>(
-    ctx: &Context<'a, 'b, 'c, 'info, SwapAndDeposit<'info>>,
-    tick_lower_index: i32,
-    tick_upper_index: i32,
-    tick_array_lower_start_index: i32,
-    tick_array_upper_start_index: i32,
+fn increase_liquidity_v2<'a, 'b, 'c: 'info, 'info>(
+    ctx: &Context<'a, 'b, 'c, 'info, IncreaseLiquidity<'info>>,
     liquidity: u128,
     amount_0_max: u64,
     amount_1_max: u64,
     base_flag: Option<bool>,
-    open_position_remaining: Vec<AccountInfo<'info>>,
+    increase_liquidity_remaining: Vec<AccountInfo<'info>>,
 ) -> Result<()> {
     let cpi_program = ctx.accounts.raydium_clmm_program.to_account_info();
 
     // 使用解构简化代码
     let accounts = &ctx.accounts;
-    let cpi_accounts = clmm_accounts::OpenPositionWithToken22Nft {
-        payer: accounts.user.to_account_info(),
-        position_nft_owner: accounts.position_nft_owner.to_account_info(),
-        position_nft_mint: accounts.position_nft_mint.to_account_info(),
-        position_nft_account: accounts.position_nft_account.to_account_info(),
+    let cpi_accounts = clmm_accounts::IncreaseLiquidityV2 {
+        nft_owner: accounts.user.to_account_info(),
+        nft_account: accounts.position_nft_account.to_account_info(),
         pool_state: accounts.pool_state.to_account_info(),
         protocol_position: accounts.protocol_position.to_account_info(),
         tick_array_lower: accounts.tick_array_lower.to_account_info(),
@@ -578,30 +546,16 @@ fn open_position_with_token22_nft<'a, 'b, 'c: 'info, 'info>(
         token_account_1: accounts.user_token1_account.to_account_info(),
         token_vault_0: accounts.token_vault_0.to_account_info(),
         token_vault_1: accounts.token_vault_1.to_account_info(),
-        rent: accounts.rent.to_account_info(),
-        system_program: accounts.system_program.to_account_info(),
         token_program: accounts.token_program.to_account_info(),
-        associated_token_program: accounts.associated_token_program.to_account_info(),
         token_program_2022: accounts.token_program_2022.to_account_info(),
         vault_0_mint: accounts.vault_0_mint.to_account_info(),
         vault_1_mint: accounts.vault_1_mint.to_account_info(),
     };
 
-    let cpi_ctx =
-        CpiContext::new(cpi_program, cpi_accounts).with_remaining_accounts(open_position_remaining);
+    let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts)
+        .with_remaining_accounts(increase_liquidity_remaining);
 
-    clmm_cpi::open_position_with_token22_nft(
-        cpi_ctx,
-        tick_lower_index,
-        tick_upper_index,
-        tick_array_lower_start_index,
-        tick_array_upper_start_index,
-        liquidity,
-        amount_0_max,
-        amount_1_max,
-        true,
-        base_flag,
-    )?;
+    clmm_cpi::increase_liquidity_v2(cpi_ctx, liquidity, amount_0_max, amount_1_max, base_flag)?;
 
     Ok(())
 }

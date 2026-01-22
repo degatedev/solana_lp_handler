@@ -54,14 +54,13 @@ pub mod lp_handler {
 
     /// 先调用 Raydium swap_v2 换币，再调用 open_position_v2 开仓添加流动性
     /// 使用 Raydium 的 liquidity_math 精确计算最优 swap 比例
-    #[allow(clippy::too_many_arguments)]
     pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
         ctx: Context<'a, 'b, 'c, 'info, SwapAndDeposit<'info>>,
         deposit_amount: u64,
         deposit_mint: Pubkey,
         tick_lower_index: i32,
         tick_upper_index: i32,
-        liquidity: i128,
+        liquidity: u128,
         slippage_bps: u16,    // 滑点，单位为基点 (1 bps = 0.01%)
         lp_slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
     ) -> Result<()> {
@@ -116,6 +115,35 @@ pub mod lp_handler {
                 slippage_bps,
                 fee_percent,
                 convert_to_usdc,
+            )
+        )
+    }
+
+    pub fn increase_liquidity<'a, 'b, 'c: 'info, 'info>(
+        ctx: Context<'a, 'b, 'c, 'info, IncreaseLiquidity<'info>>,
+        deposit_amount: u64,
+        deposit_mint: Pubkey,
+        tick_lower_index: i32,
+        tick_upper_index: i32,
+        liquidity: u128,
+        slippage_bps: u16,    // 滑点，单位为基点 (1 bps = 0.01%)
+        lp_slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
+    ) -> Result<()> {
+        let user = ctx.accounts.user.key();
+        secure_entrypoint!(
+            ctx,
+            user = user,
+            extra_authorities = &[],
+            pool_states = &[ctx.accounts.pool_state.key()],
+            body = instructions::increase_liquidity(
+                ctx,
+                deposit_amount,
+                deposit_mint,
+                tick_lower_index,
+                tick_upper_index,
+                liquidity,
+                slippage_bps,    // 滑点，单位为基点 (1 bps = 0.01%)
+                lp_slippage_bps, // 滑点，单位为基点 (1 bps = 0.01%)
             )
         )
     }

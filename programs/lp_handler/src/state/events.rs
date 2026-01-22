@@ -35,7 +35,7 @@ pub struct IncreaseLiquidityEvent {
     /// Pool 地址
     pub pool: Pubkey,
     /// Position NFT mint 地址
-    pub position_nft_mint: Pubkey,
+    pub position_nft_mint: Option<Pubkey>,
     /// 实际添加的 token0 数量
     pub amount_0: u64,
     /// 实际添加的 token1 数量
@@ -49,7 +49,7 @@ pub struct IncreaseLiquidityEvent {
     /// 价格区间上限 tick
     pub tick_upper_index: i32,
     /// 流动性值
-    pub liquidity: i128,
+    pub liquidity: u128,
     /// 预期投入的数量
     pub deposit_amount: u64,
     /// 返回的数量

@@ -82,14 +82,14 @@ pub fn calculate_optimal_swap_amount(
     tick_lower_index: i32,
     tick_upper_index: i32,
     sqrt_price_current_x64: u128,
-    liquidity: i128,
+    liquidity: u128,
 ) -> Result<(u64, u64)> {
     let (amount_0_needed, amount_1_needed) = liquidity_math::get_delta_amounts_signed(
         current_tick,
         sqrt_price_current_x64,
         tick_lower_index,
         tick_upper_index,
-        liquidity,
+        liquidity.try_into().unwrap(),
     )?;
     msg!(
         "amount_0_needed={}, amount_1_needed={}",
@@ -121,13 +121,12 @@ pub fn calculate_principal_amounts_for_liquidity(
     tick_upper_index: i32,
     liquidity: u128,
 ) -> Result<(u64, u64)> {
-    let liquidity_i128 = i128::try_from(liquidity).map_err(|_| LpDepositError::MathOverflow)?;
     let (amount_0, amount_1) = liquidity_math::get_delta_amounts_signed(
         current_tick,
         sqrt_price_current_x64,
         tick_lower_index,
         tick_upper_index,
-        liquidity_i128,
+        liquidity.try_into().unwrap(),
     )?;
     Ok((amount_0, amount_1))
 }

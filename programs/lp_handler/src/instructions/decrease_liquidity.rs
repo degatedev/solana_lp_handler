@@ -61,13 +61,11 @@ pub struct DecreaseLiquidity<'info> {
     pub fee_token1_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
     /// AMM 配置账户（swap 和 position 都需要通过 pool_state 关联）
+    #[account(address = pool_state.load()?.amm_config)]
     pub amm_config: Box<Account<'info, AmmConfig>>,
 
     /// Pool 状态账户（swap 和 open_position 都需要）
-    #[account(
-        mut,
-        constraint = pool_state.load()?.amm_config == amm_config.key()
-    )]
+    #[account(mut)]
     pub pool_state: AccountLoader<'info, PoolState>,
 
     /// Observation 状态（swap 需要）

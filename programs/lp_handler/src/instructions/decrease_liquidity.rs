@@ -6,6 +6,7 @@ use anchor_spl::token_2022::{self, Token2022};
 use anchor_spl::token_interface::{Mint, TokenAccount};
 use raydium_amm_v3::program::AmmV3;
 
+use super::zap_common;
 use crate::{is_fee_owner, utils, DecreaseLiquidityEvent, LpDepositError, SECURITY_CONFIG_SEED};
 use raydium_amm_v3::cpi as clmm_cpi;
 use raydium_amm_v3::cpi::accounts as clmm_accounts;
@@ -26,7 +27,7 @@ use raydium_amm_v3::states::{
 pub struct DecreaseLiquidity<'info> {
     // ========== 公共账户 ==========
     /// Raydium CLMM program (主网: CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK)
-    /// CHECK: 前端传入 Raydium CLMM programId
+    /// CHECK: 地址已通过 `#[account(address = ...)]` 约束为 Raydium CLMM programId
     #[account(address = raydium_amm_v3::ID)]
     pub raydium_clmm_program: Program<'info, AmmV3>,
 
@@ -34,14 +35,14 @@ pub struct DecreaseLiquidity<'info> {
     #[account(mut)]
     pub user: Signer<'info>,
 
-    /// user 的 token0 ATA 账户（如果不存在则自动创建）
+    /// user 的 token0 TokenAccount（通常为 ATA；需前端/调用方确保已创建，或在同笔交易里先创建）
     #[account(
         mut,
         token::mint = token_vault_0.mint,
       )]
     pub user_token0_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
-    /// user 的 token1 ATA 账户（如果不存在则自动创建）
+    /// user 的 token1 TokenAccount（通常为 ATA；需前端/调用方确保已创建，或在同笔交易里先创建）
     #[account(
         mut,
         token::mint = token_vault_1.mint,
@@ -64,7 +65,7 @@ pub struct DecreaseLiquidity<'info> {
     #[account(address = pool_state.load()?.amm_config)]
     pub amm_config: Box<Account<'info, AmmConfig>>,
 
-    /// Pool 状态账户（swap 和 open_position 都需要）
+    /// Pool 状态账户（swap 需要）
     #[account(mut)]
     pub pool_state: AccountLoader<'info, PoolState>,
 
@@ -72,19 +73,19 @@ pub struct DecreaseLiquidity<'info> {
     #[account(mut)]
     pub observation_state: AccountLoader<'info, ObservationState>,
 
-    /// Sysvar for token mint and ATA creation
+    /// Rent sysvar（用于 mint/ATA 创建等租金相关逻辑）
     pub rent: Sysvar<'info, Rent>,
 
-    /// Program to create the position manager state account
+    /// 系统程序（创建/分配账户）
     pub system_program: Program<'info, System>,
 
-    /// Program to transfer for token account
+    /// SPL Token 程序（Token-2022 之外的转账等）
     pub token_program: Program<'info, Token>,
 
-    /// Program to create an ATA for receiving position NFT
+    /// ATA 程序（用于创建/校验 token account 地址）
     pub associated_token_program: Program<'info, AssociatedToken>,
 
-    /// Program to create NFT mint/token account and transfer for token22 account
+    /// Token-2022 程序（用于 position NFT 的 token account/转账/close 等）
     pub token_program_2022: Program<'info, Token2022>,
 
     /// CHECK: 通用安全配置 PDA（必须传入），允许“未初始化”的 system-owned 空账户。
@@ -98,59 +99,53 @@ pub struct DecreaseLiquidity<'info> {
 
     pub memo_program: Program<'info, Memo>,
 
-    /// The address that holds pool tokens for token_0
+    /// 池子 token_0 的金库 TokenAccount 地址
     #[account(
         mut,
         constraint = token_vault_0.key() == pool_state.load()?.token_vault_0
     )]
     pub token_vault_0: Box<InterfaceAccount<'info, TokenAccount>>,
 
-    /// The address that holds pool tokens for token_1
+    /// 池子 token_1 的金库 TokenAccount 地址
     #[account(
         mut,
         constraint = token_vault_1.key() == pool_state.load()?.token_vault_1
     )]
     pub token_vault_1: Box<InterfaceAccount<'info, TokenAccount>>,
 
-    /// The mint of token vault 0
+    /// token vault 0 的 mint
     #[account(
       address = token_vault_0.mint
     )]
     pub vault_0_mint: Box<InterfaceAccount<'info, Mint>>,
 
-    /// The mint of token vault 1
+    /// token vault 1 的 mint
     #[account(
       address = token_vault_1.mint
     )]
     pub vault_1_mint: Box<InterfaceAccount<'info, Mint>>,
 
-    /// Unique token mint address, initialize in contract
-
-    /// CHECK: ATA address where position NFT will be minted, initialize in contract
+    /// CHECK: position NFT 的 token account（通常是 ATA；用于验证/关闭 position NFT）
     #[account(mut)]
     pub position_nft_account: UncheckedAccount<'info>,
 
-    /// CHECK: Deprecated: protocol_position is deprecated and kept for compatibility.
+    /// CHECK: `protocol_position` 已废弃，仅为兼容保留
     pub protocol_position: UncheckedAccount<'info>,
 
-    /// CHECK: Personal position state account, validated by Raydium CLMM program
+    /// CHECK: PersonalPosition 状态账户；由 Raydium CLMM 程序在 CPI 中校验
     #[account(mut, constraint = personal_position.pool_id == pool_state.key())]
     pub personal_position: Box<Account<'info, PersonalPositionState>>,
 
-    /// Stores init state for the lower tick
+    /// lower tick 对应的 TickArray 状态（由 Raydium 使用）
     #[account(mut, constraint = tick_array_lower.load()?.pool_id == pool_state.key())]
     pub tick_array_lower: AccountLoader<'info, TickArrayState>,
 
-    /// Stores init state for the upper tick
+    /// upper tick 对应的 TickArray 状态（由 Raydium 使用）
     #[account(mut, constraint = tick_array_upper.load()?.pool_id == pool_state.key())]
     pub tick_array_upper: AccountLoader<'info, TickArrayState>,
     // ======== IMPORTANT: remaining accounts for swap_v2 =========
     // MUST BE: [bitmap_extension?] + [swap tick arrays ONLY]
     // 所有 swap_v2 tick arrays 都在这里动态提供（前端传入）
-
-    // 比如这里我要swap remaining accounts 和 decrease_liquidity_v2 的remaining accounts 用两个集合接收
-
-    //
     // 例如：
     // [
     //   bitmap_extension?,
@@ -172,7 +167,6 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
     fee_percent: u16,
     convert_to_usdc: bool,
 ) -> Result<()> {
-    let timestamp = Clock::get()?.unix_timestamp;
     // 固定 fee 收款人白名单校验（支持多个固定地址）
     require!(
         is_fee_owner(&ctx.accounts.fee_owner.key()),
@@ -502,18 +496,6 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
                 .ok_or(LpDepositError::MathOverflow)?;
         }
 
-        msg!(
-            "swap_v2, swap_amount:{}, swap_other_amount_threshold: {}, is_token0: {}",
-            reward_other_in + principal_other_in,
-            0,
-            input_is_token0
-        );
-        msg!(
-            "balance,  user_token0_balance: {},  user_token1_balance: {}",
-            user_token0_balance_after - user_token0_balance_before,
-            user_token1_balance_after - user_token1_balance_before
-        );
-
         // 事件按“兑换后”口径输出：只在目标币种上体现 principal/reward/fee，其它币种为 0
         if target_is_token0 {
             let principal_amount_0 = principal_expected_0
@@ -523,7 +505,6 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
                 .checked_sub(integrator_fee_target)
                 .ok_or(LpDepositError::MathOverflow)?;
             emit!(DecreaseLiquidityEvent {
-                timestamp,
                 user: ctx.accounts.user.key(),
                 pool: ctx.accounts.pool_state.key(),
                 token0_mint: ctx.accounts.vault_0_mint.key(),
@@ -543,7 +524,6 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
                 .checked_sub(integrator_fee_target)
                 .ok_or(LpDepositError::MathOverflow)?;
             emit!(DecreaseLiquidityEvent {
-                timestamp,
                 user: ctx.accounts.user.key(),
                 pool: ctx.accounts.pool_state.key(),
                 token0_mint: ctx.accounts.vault_0_mint.key(),
@@ -621,7 +601,6 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             .checked_sub(integrator_fee_1)
             .ok_or(LpDepositError::MathOverflow)?;
         emit!(DecreaseLiquidityEvent {
-            timestamp,
             user: ctx.accounts.user.key(),
             pool: ctx.accounts.pool_state.key(),
             token0_mint: ctx.accounts.vault_0_mint.key(),
@@ -638,6 +617,7 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
     Ok(())
 }
 
+#[inline(never)]
 fn swap_v2<'a, 'b, 'c: 'info, 'info>(
     ctx: &Context<'a, 'b, 'c, 'info, DecreaseLiquidity<'info>>,
     swap_amount: u64,
@@ -646,70 +626,50 @@ fn swap_v2<'a, 'b, 'c: 'info, 'info>(
     is_token0: bool,
     swap_remaining: Vec<AccountInfo<'info>>,
 ) -> Result<()> {
-    // 使用解构简化代码
+    // 将 AccountInfo 的构造放到单独函数，避免增大主 handler 栈帧（BPF 栈限制 4KB）。
     let accounts = &ctx.accounts;
-    let cpi_program = accounts.raydium_clmm_program.to_account_info();
 
-    // 根据 is_token0 选择对应的账户（一次性解构）
     let (input_token, output_token, input_vault, output_vault, input_mint, output_mint) =
-        match is_token0 {
-            true => (
-                &accounts.user_token0_account,
-                &accounts.user_token1_account,
-                &accounts.token_vault_0,
-                &accounts.token_vault_1,
-                &accounts.vault_0_mint,
-                &accounts.vault_1_mint,
-            ),
-            false => (
-                &accounts.user_token1_account,
-                &accounts.user_token0_account,
-                &accounts.token_vault_1,
-                &accounts.token_vault_0,
-                &accounts.vault_1_mint,
-                &accounts.vault_0_mint,
-            ),
+        if is_token0 {
+            (
+                accounts.user_token0_account.to_account_info(),
+                accounts.user_token1_account.to_account_info(),
+                accounts.token_vault_0.to_account_info(),
+                accounts.token_vault_1.to_account_info(),
+                accounts.vault_0_mint.to_account_info(),
+                accounts.vault_1_mint.to_account_info(),
+            )
+        } else {
+            (
+                accounts.user_token1_account.to_account_info(),
+                accounts.user_token0_account.to_account_info(),
+                accounts.token_vault_1.to_account_info(),
+                accounts.token_vault_0.to_account_info(),
+                accounts.vault_1_mint.to_account_info(),
+                accounts.vault_0_mint.to_account_info(),
+            )
         };
 
-    let cpi_accounts = clmm_accounts::SwapSingleV2 {
-        payer: accounts.user.to_account_info(),
-        amm_config: accounts.amm_config.to_account_info(),
-        pool_state: accounts.pool_state.to_account_info(),
-        observation_state: accounts.observation_state.to_account_info(),
-        token_program: accounts.token_program.to_account_info(),
-        token_program_2022: accounts.token_program_2022.to_account_info(),
-        memo_program: accounts.memo_program.to_account_info(),
-        input_token_account: input_token.to_account_info(),
-        output_token_account: output_token.to_account_info(),
-        input_vault: input_vault.to_account_info(),
-        output_vault: output_vault.to_account_info(),
-        input_vault_mint: input_mint.to_account_info(),
-        output_vault_mint: output_mint.to_account_info(),
-    };
-    // 轻量校验 remaining_accounts：限制数量并要求 owner 为 Raydium CLMM program（tick array/bitmap 等应满足）
-    require!(
-        swap_remaining.len() <= 32,
-        LpDepositError::InvalidRemainingAccounts
-    );
-    for acc in swap_remaining.iter() {
-        require_keys_eq!(
-            *acc.owner,
-            accounts.raydium_clmm_program.key(),
-            LpDepositError::InvalidRemainingAccounts
-        );
-    }
-
-    let cpi_ctx =
-        CpiContext::new(cpi_program.clone(), cpi_accounts).with_remaining_accounts(swap_remaining);
-    clmm_cpi::swap_v2(
-        cpi_ctx,
+    zap_common::swap_v2_accounts(
+        accounts.raydium_clmm_program.to_account_info(),
+        accounts.user.to_account_info(),
+        accounts.amm_config.to_account_info(),
+        accounts.pool_state.to_account_info(),
+        accounts.observation_state.to_account_info(),
+        accounts.token_program.to_account_info(),
+        accounts.token_program_2022.to_account_info(),
+        accounts.memo_program.to_account_info(),
+        input_token,
+        output_token,
+        input_vault,
+        output_vault,
+        input_mint,
+        output_mint,
+        swap_remaining,
         swap_amount,
         swap_other_amount_threshold,
         sqrt_price_limit_x64,
-        true,
-    )?;
-
-    Ok(())
+    )
 }
 
 pub fn transfer_fee<'info>(

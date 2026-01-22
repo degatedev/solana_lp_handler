@@ -4,6 +4,8 @@ pub use swap_and_deposit::*;
 pub mod increase_liquidity;
 pub use increase_liquidity::*;
 
+pub mod zap_common;
+
 pub mod decrease_liquidity;
 pub use decrease_liquidity::*;
 

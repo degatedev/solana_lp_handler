@@ -21,11 +21,13 @@ use super::zap_common;
 #[instruction(
     amount_0_in: u64,
     amount_1_in: u64,
-    return_mint: Pubkey,
+    return_mint: Option<Pubkey>,
     tick_lower_index: i32,
     tick_upper_index: i32,
     slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
-    lp_slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
+    swap_amount_in: u64,
+    swap_min_out: u64,
+    swap_input_is_token0: bool,
 )]
 pub struct IncreaseLiquidity<'info> {
     // ========== 公共账户 ==========
@@ -159,11 +161,13 @@ pub fn increase_liquidity<'a, 'b, 'c: 'info, 'info>(
     ctx: Context<'a, 'b, 'c, 'info, IncreaseLiquidity<'info>>,
     amount_0_in: u64,
     amount_1_in: u64,
-    return_mint: Pubkey,
+    return_mint: Option<Pubkey>,
     tick_lower_index: i32,
     tick_upper_index: i32,
-    slippage_bps: u16,    // 滑点，单位为基点 (1 bps = 0.01%)
-    lp_slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
+    slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
+    swap_amount_in: u64,
+    swap_min_out: u64,
+    swap_input_is_token0: bool,
 ) -> Result<()> {
     let plan = zap_common::prepare_zap_plan_and_swap_if_needed(
         &mut *ctx.accounts,
@@ -174,7 +178,9 @@ pub fn increase_liquidity<'a, 'b, 'c: 'info, 'info>(
         tick_lower_index,
         tick_upper_index,
         slippage_bps,
-        lp_slippage_bps,
+        swap_amount_in,
+        swap_min_out,
+        swap_input_is_token0,
     )?;
 
     increase_liquidity_v2(

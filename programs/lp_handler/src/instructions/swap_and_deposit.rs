@@ -19,11 +19,13 @@ use super::zap_common;
 #[instruction(
     amount_0_in: u64,
     amount_1_in: u64,
-    return_mint: Pubkey,
+    return_mint: Option<Pubkey>,
     tick_lower_index: i32,
     tick_upper_index: i32,
     slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
-    lp_slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
+    swap_amount_in: u64,
+    swap_min_out: u64,
+    swap_input_is_token0: bool,
 )]
 pub struct SwapAndDeposit<'info> {
     // ========== 公共账户 ==========
@@ -163,11 +165,13 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
     ctx: Context<'a, 'b, 'c, 'info, SwapAndDeposit<'info>>,
     amount_0_in: u64,
     amount_1_in: u64,
-    return_mint: Pubkey,
+    return_mint: Option<Pubkey>,
     tick_lower_index: i32,
     tick_upper_index: i32,
-    slippage_bps: u16,    // 滑点，单位为基点 (1 bps = 0.01%)
-    lp_slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
+    slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
+    swap_amount_in: u64,
+    swap_min_out: u64,
+    swap_input_is_token0: bool,
 ) -> Result<()> {
     // 校验 position_nft_account 必须是 (position_nft_owner, position_nft_mint, Token2022) 的 ATA 地址
     // 注意：该 ATA 可能尚未初始化（由下游 CPI 创建），因此只校验地址本身，不校验 owner/program。
@@ -192,7 +196,9 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
         tick_lower_index,
         tick_upper_index,
         slippage_bps,
-        lp_slippage_bps,
+        swap_amount_in,
+        swap_min_out,
+        swap_input_is_token0,
     )?;
 
     let tick_array_lower_start_index =

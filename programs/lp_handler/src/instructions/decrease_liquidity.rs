@@ -1,8 +1,8 @@
 use anchor_lang::prelude::*;
 use anchor_spl::associated_token::AssociatedToken;
 use anchor_spl::memo::Memo;
-use anchor_spl::token::{self, Token};
-use anchor_spl::token_2022::{self, Token2022};
+use anchor_spl::token::Token;
+use anchor_spl::token_2022::Token2022;
 use anchor_spl::token_interface::{Mint, TokenAccount};
 use raydium_amm_v3::program::AmmV3;
 
@@ -373,7 +373,7 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
                     "skip reward swap: amount_out_min {} =0, transfer input to fee",
                     swap_other_amount_threshold,
                 );
-                transfer_fee(
+                zap_common::transfer_fee(
                     &ctx.accounts.user,
                     &ctx.accounts.fee_owner,
                     if input_is_token0 {
@@ -428,7 +428,7 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             .checked_div(10_000)
             .ok_or(LpDepositError::MathOverflow)?;
 
-        transfer_fee(
+        zap_common::transfer_fee(
             &ctx.accounts.user,
             &ctx.accounts.fee_owner,
             if target_is_token0 {
@@ -536,15 +536,15 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
                 reward_amount_1,
             });
         }
-        unwrap_wsol_ata_if_needed(
-            &ctx.accounts.user,
+        zap_common::unwrap_wsol_ata_if_needed(
+            ctx.accounts.user.to_account_info(),
             [
-                &ctx.accounts.user_token0_account,
-                &ctx.accounts.user_token1_account,
+                ctx.accounts.user_token0_account.to_account_info(),
+                ctx.accounts.user_token1_account.to_account_info(),
             ],
-            &ctx.accounts.token_program,
-            Some(&ctx.accounts.token_program_2022),
-            &ctx.accounts.associated_token_program,
+            ctx.accounts.token_program.to_account_info(),
+            Some(ctx.accounts.token_program_2022.to_account_info()),
+            ctx.accounts.associated_token_program.to_account_info(),
         )?;
     } else {
         // 不换币：直接对两种 token 的 reward 部分分别抽成
@@ -559,17 +559,17 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             .checked_div(10_000)
             .ok_or(LpDepositError::MathOverflow)?;
         // unwrap wSOL：关闭 authority 的 wSOL ATA，把 lamports 退回 authority
-        unwrap_wsol_ata_if_needed(
-            &ctx.accounts.user,
+        zap_common::unwrap_wsol_ata_if_needed(
+            ctx.accounts.user.to_account_info(),
             [
-                &ctx.accounts.user_token0_account,
-                &ctx.accounts.user_token1_account,
+                ctx.accounts.user_token0_account.to_account_info(),
+                ctx.accounts.user_token1_account.to_account_info(),
             ],
-            &ctx.accounts.token_program,
-            Some(&ctx.accounts.token_program_2022),
-            &ctx.accounts.associated_token_program,
+            ctx.accounts.token_program.to_account_info(),
+            Some(ctx.accounts.token_program_2022.to_account_info()),
+            ctx.accounts.associated_token_program.to_account_info(),
         )?;
-        transfer_fee(
+        zap_common::transfer_fee(
             &ctx.accounts.user,
             &ctx.accounts.fee_owner,
             &ctx.accounts.user_token0_account,
@@ -580,7 +580,7 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             &ctx.accounts.system_program,
             integrator_fee_0,
         )?;
-        transfer_fee(
+        zap_common::transfer_fee(
             &ctx.accounts.user,
             &ctx.accounts.fee_owner,
             &ctx.accounts.user_token1_account,
@@ -670,130 +670,4 @@ fn swap_v2<'a, 'b, 'c: 'info, 'info>(
         swap_other_amount_threshold,
         sqrt_price_limit_x64,
     )
-}
-
-pub fn transfer_fee<'info>(
-    signer: &Signer<'info>,
-    fee_owner: &SystemAccount<'info>,
-    from: &InterfaceAccount<'info, TokenAccount>,
-    to: &InterfaceAccount<'info, TokenAccount>,
-    mint: Option<&InterfaceAccount<'info, Mint>>,
-    token_program: &Program<'info, Token>,
-    token_program_2022: Option<&Program<'info, Token2022>>,
-    system_program: &Program<'info, System>,
-    amount: u64,
-) -> Result<()> {
-    if amount == 0 {
-        return Ok(());
-    }
-    let mut token_program_info = token_program.to_account_info();
-
-    // 如果手续费 mint 是 wSOL(native mint)，则直接转 SOL（lamports）给 sol_destination，而不是转 wSOL token
-    // 注意：wSOL 的最小单位与 lamports 等价（9 decimals）
-    if let Some(mint) = mint {
-        if mint.key() == anchor_spl::token::spl_token::native_mint::ID {
-            anchor_lang::system_program::transfer(
-                CpiContext::new(
-                    system_program.to_account_info(),
-                    anchor_lang::system_program::Transfer {
-                        from: signer.to_account_info(),
-                        to: fee_owner.to_account_info(),
-                    },
-                ),
-                amount,
-            )?;
-            return Ok(());
-        }
-    }
-
-    match (mint, token_program_2022) {
-        (Some(mint), Some(token_program_2022)) => {
-            if from.to_account_info().owner == token_program_2022.key {
-                token_program_info = token_program_2022.to_account_info()
-            }
-            token_2022::transfer_checked(
-                CpiContext::new(
-                    token_program_info,
-                    token_2022::TransferChecked {
-                        from: from.to_account_info(),
-                        to: to.to_account_info(),
-                        authority: signer.to_account_info(),
-                        mint: mint.to_account_info(),
-                    },
-                ),
-                amount,
-                mint.decimals,
-            )?;
-        }
-        _ => token::transfer(
-            CpiContext::new(
-                token_program_info,
-                token::Transfer {
-                    from: from.to_account_info(),
-                    to: to.to_account_info(),
-                    authority: signer.to_account_info(),
-                },
-            ),
-            amount,
-        )?,
-    }
-
-    Ok(())
-}
-
-// unwrap wSOL ATA：仅当传入的 token account 确实是 user 的 wSOL ATA 时才执行关闭（否则跳过）
-fn unwrap_wsol_ata_if_needed<'info>(
-    user: &Signer<'info>,
-    token_accounts: [&InterfaceAccount<'info, TokenAccount>; 2],
-    token_program: &Program<'info, Token>,
-    token_program_2022: Option<&Program<'info, Token2022>>,
-    associated_token_program: &Program<'info, AssociatedToken>,
-) -> Result<()> {
-    // wSOL = SPL Token native mint
-    let wsol_mint_key = anchor_spl::token::spl_token::native_mint::ID;
-
-    // native(wSOL) 账户允许在 amount != 0 时 close：lamports 会退回 destination（这里是 user），效果等同 unwrap
-    for token_acc in token_accounts.iter() {
-        // 仅关闭 user 的 ATA；不是就跳过（不报错）
-        let token_program_for_ata = match token_program_2022 {
-            Some(tp22) if token_acc.to_account_info().owner == tp22.key => tp22.key(),
-            _ => token_program.key(),
-        };
-        let expected_ata = utils::derive_ata_address(
-            &user.key(),
-            &wsol_mint_key,
-            &token_program_for_ata,
-            &associated_token_program.key(),
-        );
-        if token_acc.key() != expected_ata {
-            continue;
-        }
-
-        let token_account_info = token_acc.to_account_info();
-
-        match token_program_2022 {
-            Some(tp22) if token_account_info.owner == tp22.key => {
-                token_2022::close_account(CpiContext::new(
-                    tp22.to_account_info(),
-                    token_2022::CloseAccount {
-                        account: token_account_info,
-                        destination: user.to_account_info(),
-                        authority: user.to_account_info(),
-                    },
-                ))?;
-            }
-            _ => {
-                token::close_account(CpiContext::new(
-                    token_program.to_account_info(),
-                    token::CloseAccount {
-                        account: token_account_info,
-                        destination: user.to_account_info(),
-                        authority: user.to_account_info(),
-                    },
-                ))?;
-            }
-        }
-    }
-
-    Ok(())
 }

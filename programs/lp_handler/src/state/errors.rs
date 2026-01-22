@@ -17,6 +17,12 @@ pub enum LpDepositError {
     #[msg("Invalid deposit amount")]
     InvalidDepositAmount,
 
+    #[msg("Insufficient token balance")]
+    InsufficientBalance,
+
+    #[msg("Pool price out of range at execution: plan swap direction is incompatible with single-sided requirement")]
+    OutOfRangeAtExecution,
+
     #[msg("Invalid position nft owner")]
     InvalidPositionNftOwner,
 
@@ -44,53 +50,55 @@ pub enum LpDepositError {
     // -----------------------------
     // Security layer errors
     // -----------------------------
-    #[msg("remaining_accounts 分隔符无效：必须且只能出现一次 lp_handler programId，且该账户需 executable、非 signer、非 writable")]
+    #[msg("Invalid remaining_accounts separator: lp_handler programId must appear exactly once and must be executable, non-signer, and non-writable")]
     SecuritySeparatorInvalid,
 
-    #[msg("交易账户列表包含未允许的可执行程序账户（executable program）。请检查是否引入了未白名单的第三方 program")]
+    #[msg(
+        "Unauthorized executable program account found in transaction accounts (not in whitelist)"
+    )]
     SecurityUnauthorizedExecutableProgram,
 
-    #[msg("Pool 不在允许列表：pool_state 未在 ALLOWED_POOLS 白名单中")]
+    #[msg("Pool not allowed: pool_state is not in ALLOWED_POOLS whitelist")]
     SecurityPoolNotAllowed,
 
-    #[msg("安全配置 PDA 缺失：必须在账户列表中提供 security_config PDA")]
+    #[msg("Security config PDA missing: security_config PDA must be provided in accounts")]
     SecurityPoolWhitelistMissing,
 
-    #[msg("安全配置 PDA 无效：owner 不是本程序或反序列化失败")]
+    #[msg("Invalid security config PDA: owner is not this program or deserialization failed")]
     SecurityPoolWhitelistInvalid,
 
-    #[msg("安全配置管理员校验失败：authority 不是 admin")]
+    #[msg("Security config admin unauthorized: authority is not admin")]
     SecurityConfigAdminUnauthorized,
 
-    #[msg("Token-2022 mint 含高风险扩展（如 PermanentDelegate/TransferHook/Confidential/NonTransferable），已拒绝")]
+    #[msg("Token-2022 mint has forbidden high-risk extensions (e.g. PermanentDelegate/TransferHook/Confidential/NonTransferable)")]
     SecurityToken2022ForbiddenExtension,
 
-    #[msg("黑名单命中：检测到被拉黑的地址作为 user/authority/delegate/close_authority")]
+    #[msg("Blacklisted address detected in user/authority/delegate/close_authority")]
     SecurityBlacklistedUser,
 
-    #[msg("账户集合异常：入口快照中的账户在出口阶段缺失（账户集合应为闭包）")]
+    #[msg("Account set changed: an account present at entry is missing at exit (account set must be closed)")]
     SecurityAccountSetChanged,
 
-    #[msg("程序自有账户滞留 SOL：owner==lp_handler 的账户 lamports 超过 rent-exempt 最小值")]
+    #[msg("Program-owned account has leaked SOL: lamports exceed rent-exempt minimum (owner==lp_handler)")]
     SecurityProgramLamportsLeaked,
 
     #[msg(
-        "Token 账户状态异常：入口为 token account，出口无法解析为 token account（可能被替换/损坏）"
+        "Token account corrupted: token account at entry cannot be parsed as token account at exit"
     )]
     SecurityTokenAccountCorrupted,
 
-    #[msg("Token 权限异常：用户 token account 的 authority(owner) 被更改（应保持为 user）")]
+    #[msg("Token authority changed: user token account authority(owner) was modified (must remain user)")]
     SecurityTokenAuthorityChanged,
 
-    #[msg("Token 权限异常：检测到 delegate（默认策略禁止设置 delegate）")]
+    #[msg("Token delegate not allowed (default policy forbids delegate)")]
     SecurityTokenDelegateNotAllowed,
 
-    #[msg("Token 权限异常：检测到 close_authority（默认策略禁止设置 close_authority）")]
+    #[msg("Token close_authority not allowed (default policy forbids close_authority)")]
     SecurityTokenCloseAuthorityNotAllowed,
 
-    #[msg("新初始化账户 owner 不合规：新账户的 owner(program id) 不在 ALLOWED_ACCOUNT_OWNERS 白名单中")]
+    #[msg("Disallowed new account owner: new account owner(program id) is not in ALLOWED_ACCOUNT_OWNERS whitelist")]
     SecurityDisallowedAccountOwner,
 
-    #[msg("新初始化 token account authority 不合规：其 authority(owner) 不在允许集合（user + extra_authorities；fee_owner 特权场景例外）")]
+    #[msg("Invalid new token account authority: authority(owner) not in allowed set (user + extra_authorities; fee_owner privileged case excluded)")]
     SecurityNewTokenAccountAuthorityInvalid,
 }

@@ -1,13 +1,15 @@
 use anchor_lang::prelude::*;
+use anchor_spl::associated_token::AssociatedToken;
+use anchor_spl::memo::Memo;
+use anchor_spl::token;
+use anchor_spl::token::Token;
+use anchor_spl::token_2022::{self, Token2022};
+use anchor_spl::token_interface::{Mint, TokenAccount};
 use raydium_amm_v3::cpi as clmm_cpi;
 use raydium_amm_v3::cpi::accounts as clmm_accounts;
-use raydium_amm_v3::libraries::{get_sqrt_price_at_tick, liquidity_math, U256};
+use raydium_amm_v3::libraries::{get_sqrt_price_at_tick, liquidity_math};
 use raydium_amm_v3::program::AmmV3;
 use raydium_amm_v3::states::{AmmConfig, ObservationState, PoolState};
-
-use anchor_spl::memo::Memo;
-use anchor_spl::token::Token;
-use anchor_spl::token_interface::{Mint, Token2022, TokenAccount};
 
 use crate::{utils, IncreaseLiquidityEvent, LpDepositError, SwapExecutedEvent};
 
@@ -32,6 +34,7 @@ pub trait ZapCommonAccounts<'info> {
 
     fn token_program(&self) -> &Program<'info, Token>;
     fn token_program_2022(&self) -> &Program<'info, Token2022>;
+    fn associated_token_program(&self) -> &Program<'info, AssociatedToken>;
 
     fn vault_0_mint(&self) -> &Box<InterfaceAccount<'info, Mint>>;
     fn vault_1_mint(&self) -> &Box<InterfaceAccount<'info, Mint>>;
@@ -86,6 +89,9 @@ macro_rules! impl_zap_common_accounts {
             fn token_program_2022(&self) -> &Program<'info, Token2022> {
                 &self.token_program_2022
             }
+            fn associated_token_program(&self) -> &Program<'info, AssociatedToken> {
+                &self.associated_token_program
+            }
 
             fn vault_0_mint(&self) -> &Box<InterfaceAccount<'info, Mint>> {
                 &self.vault_0_mint
@@ -123,11 +129,13 @@ pub fn prepare_zap_plan_and_swap_if_needed<'info>(
     remaining_accounts: &[AccountInfo<'info>],
     amount_0_in: u64,
     amount_1_in: u64,
-    return_mint: Pubkey,
+    return_mint: Option<Pubkey>,
     tick_lower_index: i32,
     tick_upper_index: i32,
     slippage_bps: u16,
-    lp_slippage_bps: u16,
+    swap_amount_in: u64,
+    swap_min_out: u64,
+    swap_input_is_token0: bool,
 ) -> Result<ZapPlan<'info>> {
     require!(
         tick_lower_index < tick_upper_index,
@@ -137,21 +145,96 @@ pub fn prepare_zap_plan_and_swap_if_needed<'info>(
         amount_0_in > 0 || amount_1_in > 0,
         LpDepositError::InvalidDepositAmount
     );
-    // return_mint 必须是池子的 token0 或 token1
-    require!(
-        return_mint == accounts.vault_0_mint().key()
-            || return_mint == accounts.vault_1_mint().key(),
-        LpDepositError::InvalidDepositMint
-    );
+    // return_mint 若提供，必须是池子的 token0 或 token1
+    if let Some(return_mint) = return_mint {
+        require!(
+            return_mint == accounts.vault_0_mint().key()
+                || return_mint == accounts.vault_1_mint().key(),
+            LpDepositError::InvalidDepositMint
+        );
+    }
     require!(slippage_bps < 5_000, LpDepositError::InvalidSlippage);
 
-    let tick_spacing = {
+    // 上链执行时如果价格跑出区间：允许“单边投入”，并由合约自动把不需要的一侧换成需要的一侧（最多一次 swap）。
+    // - sp <= sa：区间在现价上方 → 只需要 token0 → 若 amount_1_in>0，自动执行 token1->token0 全额兑换
+    // - sp >= sb：区间在现价下方 → 只需要 token1 → 若 amount_0_in>0，自动执行 token0->token1 全额兑换
+    // - sa < sp < sb：区间跨现价 → 走链下 plan（swap_amount_in/min_out/方向）
+    let (sqrt_price_x64_now, tick_spacing) = {
         let pool_state = accounts.pool_state().load()?;
-        pool_state.tick_spacing
+        (pool_state.sqrt_price_x64, pool_state.tick_spacing)
     };
+    let sa = get_sqrt_price_at_tick(tick_lower_index)?;
+    let sb = get_sqrt_price_at_tick(tick_upper_index)?;
+
+    // 最终实际执行的 swap（可能来自链下 plan，也可能因“出区间”被合约覆盖）
+    let trade_fee_rate = accounts.amm_config().trade_fee_rate;
+    let mut exec_swap_amount_in = swap_amount_in;
+    let mut exec_swap_min_out = swap_min_out;
+    let mut exec_swap_input_is_token0 = swap_input_is_token0;
+
+    let out_of_range = sqrt_price_x64_now <= sa || sqrt_price_x64_now >= sb;
+    if sqrt_price_x64_now <= sa {
+        // 只需要 token0：把 token1 全换成 token0
+        exec_swap_input_is_token0 = false;
+        exec_swap_amount_in = amount_1_in;
+        exec_swap_min_out = if exec_swap_amount_in > 0 {
+            utils::calc_min_amount_out(
+                exec_swap_amount_in,
+                exec_swap_input_is_token0,
+                sqrt_price_x64_now,
+                slippage_bps,
+                trade_fee_rate,
+            )?
+        } else {
+            0
+        };
+    } else if sqrt_price_x64_now >= sb {
+        // 只需要 token1：把 token0 全换成 token1
+        exec_swap_input_is_token0 = true;
+        exec_swap_amount_in = amount_0_in;
+        exec_swap_min_out = if exec_swap_amount_in > 0 {
+            utils::calc_min_amount_out(
+                exec_swap_amount_in,
+                exec_swap_input_is_token0,
+                sqrt_price_x64_now,
+                slippage_bps,
+                trade_fee_rate,
+            )?
+        } else {
+            0
+        };
+    }
 
     let balance_0_before = accounts.user_token0_account().amount;
     let balance_1_before = accounts.user_token1_account().amount;
+
+    // 校验：用户至少拥有本次允许的最大投入
+    require!(
+        balance_0_before >= amount_0_in,
+        LpDepositError::InsufficientBalance
+    );
+    require!(
+        balance_1_before >= amount_1_in,
+        LpDepositError::InsufficientBalance
+    );
+
+    // 仅在“区间跨现价”时校验链下 plan（出区间时 swap 会被合约覆盖）
+    if !out_of_range {
+        // swap_in 不能超过输入预算；swap=0 时 min_out 必须为 0
+        if swap_amount_in == 0 {
+            require!(swap_min_out == 0, LpDepositError::InvalidDepositAmount);
+        } else if swap_input_is_token0 {
+            require!(
+                swap_amount_in <= amount_0_in,
+                LpDepositError::InvalidDepositAmount
+            );
+        } else {
+            require!(
+                swap_amount_in <= amount_1_in,
+                LpDepositError::InvalidDepositAmount
+            );
+        }
+    }
 
     // remaining_accounts：用 programId 作为分隔符拆为两段（与现有逻辑一致）
     let sep = crate::ID;
@@ -165,92 +248,19 @@ pub fn prepare_zap_plan_and_swap_if_needed<'info>(
     let swap_remaining: Vec<AccountInfo<'info>> = swap_remaining_slice.to_vec();
     let action_remaining: Vec<AccountInfo<'info>> = action_remaining_slice.to_vec();
 
-    // ====== 计算是否需要主配平 swap（最多一次）======
-    // 说明：此处仅用当前价格做近似配平，真实价格冲击由 Raydium 的 slippage/min_out 兜底。
-    let trade_fee_rate = accounts.amm_config().trade_fee_rate;
-    let sqrt_price_x64 = {
-        let pool_state = accounts.pool_state().load()?;
-        pool_state.sqrt_price_x64
-    };
-    let sa = get_sqrt_price_at_tick(tick_lower_index)?;
-    let sb = get_sqrt_price_at_tick(tick_upper_index)?;
-    let sp = sqrt_price_x64;
-
-    let (mut swap_in, mut swap_input_is_token0) = (0u64, true);
-    if sp <= sa {
-        // 区间在现价上方：只需 token0
-        if amount_1_in > 0 {
-            swap_in = amount_1_in;
-            swap_input_is_token0 = false; // token1 -> token0
-        }
-    } else if sp >= sb {
-        // 区间在现价下方：只需 token1
-        if amount_0_in > 0 {
-            swap_in = amount_0_in;
-            swap_input_is_token0 = true; // token0 -> token1
-        }
-    } else {
-        // 区间跨现价：按目标配比 R* = token1/token0 配平
-        let (r_num, r_den) = compute_rstar_ratio(sa, sp, sb)?;
-        // 当前配比（token1/token0）
-        let cur_left = U256::from(amount_1_in as u128) * r_den;
-        let cur_right = U256::from(amount_0_in as u128) * r_num;
-        if cur_left > cur_right {
-            // token1 偏多：swap token1 -> token0
-            swap_input_is_token0 = false;
-            swap_in = solve_swap_amount_for_target_ratio(
-                amount_0_in,
-                amount_1_in,
-                false,
-                r_num,
-                r_den,
-                sp,
-                trade_fee_rate,
-            )?;
-        } else if cur_left < cur_right {
-            // token0 偏多：swap token0 -> token1
-            swap_input_is_token0 = true;
-            swap_in = solve_swap_amount_for_target_ratio(
-                amount_0_in,
-                amount_1_in,
-                true,
-                r_num,
-                r_den,
-                sp,
-                trade_fee_rate,
-            )?;
-        }
-    }
-
-    // 执行主配平 swap（如需要）
+    // 执行主配平 swap（plan 指定，最多一次）
     let mut amount_0_max = amount_0_in;
     let mut amount_1_max = amount_1_in;
     let balance_0_pre_cpi: u64;
     let balance_1_pre_cpi: u64;
 
-    if swap_in > 0 {
-        // lp_slippage_bps 只影响 swap_in 的“实际执行量”，保持与旧逻辑一致（向下取整）
-        let swap_amount_min = utils::apply_slippage_bps_floor(swap_in, lp_slippage_bps)?;
-
-        // 用最新 sqrt_price 估算 min_out（避免价格变动导致 min_out 偏差）
-        let sqrt_price_x64_for_min_out = {
-            let pool_state = accounts.pool_state().load()?;
-            pool_state.sqrt_price_x64
-        };
-        let min_amount_out = utils::calc_min_amount_out(
-            swap_amount_min,
-            swap_input_is_token0,
-            sqrt_price_x64_for_min_out,
-            slippage_bps,
-            trade_fee_rate,
-        )?;
-
+    if exec_swap_amount_in > 0 {
         swap_v2_common(
             accounts,
-            swap_amount_min,
-            min_amount_out,
+            exec_swap_amount_in,
+            exec_swap_min_out,
             0,
-            swap_input_is_token0,
+            exec_swap_input_is_token0,
             swap_remaining.clone(),
         )?;
 
@@ -260,8 +270,16 @@ pub fn prepare_zap_plan_and_swap_if_needed<'info>(
         let balance_0_after_swap = accounts.user_token0_account().amount;
         let balance_1_after_swap = accounts.user_token1_account().amount;
 
-        // 输出币种的实际增量
-        let amount_out_after = if swap_input_is_token0 {
+        let spent_in = if exec_swap_input_is_token0 {
+            balance_0_before
+                .checked_sub(balance_0_after_swap)
+                .ok_or(LpDepositError::MathOverflow)?
+        } else {
+            balance_1_before
+                .checked_sub(balance_1_after_swap)
+                .ok_or(LpDepositError::MathOverflow)?
+        };
+        let amount_out_after = if exec_swap_input_is_token0 {
             balance_1_after_swap
                 .checked_sub(balance_1_before)
                 .ok_or(LpDepositError::MathOverflow)?
@@ -271,23 +289,36 @@ pub fn prepare_zap_plan_and_swap_if_needed<'info>(
                 .ok_or(LpDepositError::MathOverflow)?
         };
 
+        // 若 token 有转账费，实际扣款可能 > swap_amount_in；必须确保不超过用户输入预算
+        if exec_swap_input_is_token0 {
+            require!(
+                spent_in <= amount_0_in,
+                LpDepositError::InvalidDepositAmount
+            );
+        } else {
+            require!(
+                spent_in <= amount_1_in,
+                LpDepositError::InvalidDepositAmount
+            );
+        }
+
         emit!(SwapExecutedEvent {
             user: accounts.user().key(),
             pool: accounts.pool_state().key(),
-            amount_in: swap_amount_min,
+            amount_in: spent_in,
             amount_out: amount_out_after,
-            amount_out_min: min_amount_out,
-            is_token0_input: swap_input_is_token0,
+            amount_out_min: exec_swap_min_out,
+            is_token0_input: exec_swap_input_is_token0,
             token0_mint: accounts.vault_0_mint().key(),
             token1_mint: accounts.vault_1_mint().key(),
             slippage_bps,
         });
 
         // 计算 CPI 可用的 max（= 输入预算经过 swap 后的可用额度）
-        if swap_input_is_token0 {
+        if exec_swap_input_is_token0 {
             // token0 -> token1：token0 减少 swap_in，token1 增加 out
             amount_0_max = amount_0_in
-                .checked_sub(swap_amount_min)
+                .checked_sub(spent_in)
                 .ok_or(LpDepositError::MathOverflow)?;
             amount_1_max = amount_1_in
                 .checked_add(amount_out_after)
@@ -295,7 +326,7 @@ pub fn prepare_zap_plan_and_swap_if_needed<'info>(
         } else {
             // token1 -> token0：token1 减少 swap_in，token0 增加 out
             amount_1_max = amount_1_in
-                .checked_sub(swap_amount_min)
+                .checked_sub(spent_in)
                 .ok_or(LpDepositError::MathOverflow)?;
             amount_0_max = amount_0_in
                 .checked_add(amount_out_after)
@@ -352,7 +383,7 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
     accounts: &mut dyn ZapCommonAccounts<'info>,
     amount_0_in: u64,
     amount_1_in: u64,
-    return_mint: Pubkey,
+    return_mint: Option<Pubkey>,
     tick_lower_index: i32,
     tick_upper_index: i32,
     computed_liquidity: u128,
@@ -381,79 +412,86 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
     let leftover_0 = amount_0_max.checked_sub(spent_0).unwrap_or(0);
     let leftover_1 = amount_1_max.checked_sub(spent_1).unwrap_or(0);
 
-    // 把非 return_mint 的剩余统一兑换成 return_mint
-    let return_amount: u64;
+    // 可选：把非 return_mint 的剩余统一兑换成 return_mint
     let vault0 = accounts.vault_0_mint().key();
     let vault1 = accounts.vault_1_mint().key();
-    require!(
-        return_mint == vault0 || return_mint == vault1,
-        LpDepositError::InvalidDepositMint
-    );
+    let mut return_amount: u64 = 0;
 
-    if return_mint == vault0 {
-        // token0 作为返回币种
-        let mut out_from_swap = 0u64;
-        if leftover_1 > 0 {
-            let before0 = accounts.user_token0_account().amount;
-            let sqrt_price_x64 = {
-                let pool_state = accounts.pool_state().load()?;
-                pool_state.sqrt_price_x64
-            };
-            let min_out = utils::calc_min_amount_out(
-                leftover_1,
-                false,
-                sqrt_price_x64,
-                slippage_bps,
-                accounts.amm_config().trade_fee_rate,
-            )?;
-            swap_v2_common(
-                accounts,
-                leftover_1,
-                min_out,
-                0,
-                false,
-                swap_remaining.clone(),
-            )?;
-            accounts.user_token0_account().reload()?;
-            out_from_swap = accounts
-                .user_token0_account()
-                .amount
-                .checked_sub(before0)
-                .unwrap_or(0);
+    if let Some(return_mint) = return_mint {
+        require!(
+            return_mint == vault0 || return_mint == vault1,
+            LpDepositError::InvalidDepositMint
+        );
+
+        if return_mint == vault0 {
+            // token0 作为返回币种
+            let mut out_from_swap = 0u64;
+            if leftover_1 > 0 {
+                let before0 = accounts.user_token0_account().amount;
+                let sqrt_price_x64 = {
+                    let pool_state = accounts.pool_state().load()?;
+                    pool_state.sqrt_price_x64
+                };
+                let min_out = utils::calc_min_amount_out(
+                    leftover_1,
+                    false,
+                    sqrt_price_x64,
+                    slippage_bps,
+                    accounts.amm_config().trade_fee_rate,
+                )?;
+                if min_out > 0 {
+                    swap_v2_common(
+                        accounts,
+                        leftover_1,
+                        min_out,
+                        0,
+                        false,
+                        swap_remaining.clone(),
+                    )?;
+                    accounts.user_token0_account().reload()?;
+                    out_from_swap = accounts
+                        .user_token0_account()
+                        .amount
+                        .checked_sub(before0)
+                        .unwrap_or(0);
+                }
+            }
+            return_amount = leftover_0.checked_add(out_from_swap).unwrap_or(0);
+        } else {
+            // token1 作为返回币种
+            let mut out_from_swap = 0u64;
+            if leftover_0 > 0 {
+                let before1 = accounts.user_token1_account().amount;
+                let sqrt_price_x64 = {
+                    let pool_state = accounts.pool_state().load()?;
+                    pool_state.sqrt_price_x64
+                };
+                let min_out = utils::calc_min_amount_out(
+                    leftover_0,
+                    true,
+                    sqrt_price_x64,
+                    slippage_bps,
+                    accounts.amm_config().trade_fee_rate,
+                )?;
+                if min_out > 0 {
+                    swap_v2_common(
+                        accounts,
+                        leftover_0,
+                        min_out,
+                        0,
+                        true,
+                        swap_remaining.clone(),
+                    )?;
+                    accounts.user_token1_account().reload()?;
+                    out_from_swap = accounts
+                        .user_token1_account()
+                        .amount
+                        .checked_sub(before1)
+                        .unwrap_or(0);
+                }
+            }
+            return_amount = leftover_1.checked_add(out_from_swap).unwrap_or(0);
         }
-        return_amount = leftover_0.checked_add(out_from_swap).unwrap_or(0);
-    } else {
-        // token1 作为返回币种
-        let mut out_from_swap = 0u64;
-        if leftover_0 > 0 {
-            let before1 = accounts.user_token1_account().amount;
-            let sqrt_price_x64 = {
-                let pool_state = accounts.pool_state().load()?;
-                pool_state.sqrt_price_x64
-            };
-            let min_out = utils::calc_min_amount_out(
-                leftover_0,
-                true,
-                sqrt_price_x64,
-                slippage_bps,
-                accounts.amm_config().trade_fee_rate,
-            )?;
-            swap_v2_common(
-                accounts,
-                leftover_0,
-                min_out,
-                0,
-                true,
-                swap_remaining.clone(),
-            )?;
-            accounts.user_token1_account().reload()?;
-            out_from_swap = accounts
-                .user_token1_account()
-                .amount
-                .checked_sub(before1)
-                .unwrap_or(0);
-        }
-        return_amount = leftover_1.checked_add(out_from_swap).unwrap_or(0);
     }
 
     emit!(IncreaseLiquidityEvent {
@@ -473,120 +511,23 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
         return_amount,
     });
 
+    // 这里必须先把 AccountInfo 拷贝出来，避免同时出现 &self / &mut self 的借用冲突
+    let user_ai = accounts.user().to_account_info();
+    let user_token0_ai = { accounts.user_token0_account().to_account_info() };
+    let user_token1_ai = { accounts.user_token1_account().to_account_info() };
+    let token_program_ai = accounts.token_program().to_account_info();
+    let token_program_2022_ai = accounts.token_program_2022().to_account_info();
+    let associated_token_program_ai = accounts.associated_token_program().to_account_info();
+
+    unwrap_wsol_ata_if_needed(
+        user_ai,
+        [user_token0_ai, user_token1_ai],
+        token_program_ai,
+        Some(token_program_2022_ai),
+        associated_token_program_ai,
+    )?;
+
     Ok(return_amount)
-}
-
-fn compute_rstar_ratio(sa: u128, sp: u128, sb: u128) -> Result<(U256, U256)> {
-    // R* = (sp - sa) * (sp * sb) / (sb - sp)
-    require!(sb > sp, LpDepositError::InvalidSqrtPrice);
-    require!(sp > sa, LpDepositError::InvalidSqrtPrice);
-
-    let sp_u = U256::from(sp);
-    let sa_u = U256::from(sa);
-    let sb_u = U256::from(sb);
-
-    let num = (sp_u - sa_u) * (sp_u * sb_u);
-    let den = sb_u - sp_u;
-    Ok((num, den))
-}
-
-fn quote_out_no_slippage(
-    amount_in: u64,
-    input_is_token0: bool,
-    sqrt_price_x64: u128,
-    trade_fee_rate: u32,
-) -> Result<u64> {
-    require!(trade_fee_rate <= 1_000_000, LpDepositError::MathOverflow);
-
-    let amount_in_u = U256::from(amount_in as u128);
-    let sqrt_price = U256::from(sqrt_price_x64);
-    let price_q128 = (sqrt_price * sqrt_price) >> 64;
-    require!(!price_q128.is_zero(), LpDepositError::InvalidSqrtPrice);
-
-    let fee_factor = U256::from(1_000_000u128 - trade_fee_rate as u128);
-    let out_before_fee = if input_is_token0 {
-        let raw = (amount_in_u * price_q128) >> 64;
-        raw
-    } else {
-        let inv_price = ((U256::one() << 64) << 64) / price_q128;
-        let raw = (amount_in_u * inv_price) >> 64;
-        raw
-    };
-
-    let out_after_fee = (out_before_fee * fee_factor) / U256::from(1_000_000u128);
-    require!(
-        out_after_fee <= U256::from(u64::MAX as u128),
-        LpDepositError::MathOverflow
-    );
-    Ok(out_after_fee.as_u64())
-}
-
-fn solve_swap_amount_for_target_ratio(
-    amount_0_in: u64,
-    amount_1_in: u64,
-    input_is_token0: bool,
-    r_num: U256,
-    r_den: U256,
-    sqrt_price_x64: u128,
-    trade_fee_rate: u32,
-) -> Result<u64> {
-    // 二分搜索 swap_in，使得 swap 后 (token1/token0) 尽量接近 R*
-    let mut lo: u64 = 0;
-    let mut hi: u64 = if input_is_token0 {
-        amount_0_in
-    } else {
-        amount_1_in
-    };
-
-    // 限制迭代，避免计算量过大
-    for _ in 0..28 {
-        if lo >= hi {
-            break;
-        }
-        let mid = (lo + hi) / 2;
-        if mid == lo {
-            break;
-        }
-        let out = quote_out_no_slippage(mid, input_is_token0, sqrt_price_x64, trade_fee_rate)?;
-
-        let (new0, new1) = if input_is_token0 {
-            (
-                (amount_0_in as i128 - mid as i128).max(0) as u64,
-                amount_1_in
-                    .checked_add(out)
-                    .ok_or(LpDepositError::MathOverflow)?,
-            )
-        } else {
-            (
-                amount_0_in
-                    .checked_add(out)
-                    .ok_or(LpDepositError::MathOverflow)?,
-                (amount_1_in as i128 - mid as i128).max(0) as u64,
-            )
-        };
-
-        // 比较 new1/new0 与 R*：new1 * r_den ? new0 * r_num
-        let left = U256::from(new1 as u128) * r_den;
-        let right = U256::from(new0 as u128) * r_num;
-
-        if input_is_token0 {
-            // ratio 随 mid 增大而增大
-            if left < right {
-                lo = mid;
-            } else {
-                hi = mid;
-            }
-        } else {
-            // token1->token0 时 ratio 随 mid 增大而减小
-            if left > right {
-                lo = mid;
-            } else {
-                hi = mid;
-            }
-        }
-    }
-
-    Ok(hi)
 }
 
 /// 公开的 swap_v2 工具：仅依赖 AccountInfo，不依赖 `ZapCommonAccounts`。
@@ -728,4 +669,128 @@ fn swap_v2_common<'info>(
         swap_other_amount_threshold,
         sqrt_price_limit_x64,
     )
+}
+
+// unwrap wSOL ATA：仅当传入的 token account 确实是 user 的 wSOL ATA 时才执行关闭（否则跳过）
+pub fn unwrap_wsol_ata_if_needed<'info>(
+    user: AccountInfo<'info>,
+    token_accounts: [AccountInfo<'info>; 2],
+    token_program: AccountInfo<'info>,
+    token_program_2022: Option<AccountInfo<'info>>,
+    associated_token_program: AccountInfo<'info>,
+) -> Result<()> {
+    // wSOL = SPL Token native mint
+    let wsol_mint_key = anchor_spl::token::spl_token::native_mint::ID;
+
+    // native(wSOL) 账户允许在 amount != 0 时 close：lamports 会退回 destination（这里是 user），效果等同 unwrap
+    for token_acc in token_accounts.iter() {
+        // 仅关闭 user 的 ATA；不是就跳过（不报错）
+        let token_program_for_ata = match token_program_2022.as_ref() {
+            Some(tp22) if token_acc.owner == tp22.key => tp22.key(),
+            _ => token_program.key(),
+        };
+        let expected_ata = utils::derive_ata_address(
+            &user.key(),
+            &wsol_mint_key,
+            &token_program_for_ata,
+            &associated_token_program.key(),
+        );
+        if token_acc.key() != expected_ata {
+            continue;
+        }
+
+        match token_program_2022.as_ref() {
+            Some(tp22) if token_acc.owner == tp22.key => {
+                token_2022::close_account(CpiContext::new(
+                    tp22.to_account_info(),
+                    token_2022::CloseAccount {
+                        account: token_acc.to_account_info(),
+                        destination: user.to_account_info(),
+                        authority: user.to_account_info(),
+                    },
+                ))?;
+            }
+            _ => {
+                token::close_account(CpiContext::new(
+                    token_program.to_account_info(),
+                    token::CloseAccount {
+                        account: token_acc.to_account_info(),
+                        destination: user.to_account_info(),
+                        authority: user.to_account_info(),
+                    },
+                ))?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub fn transfer_fee<'info>(
+    signer: &Signer<'info>,
+    fee_owner: &SystemAccount<'info>,
+    from: &InterfaceAccount<'info, TokenAccount>,
+    to: &InterfaceAccount<'info, TokenAccount>,
+    mint: Option<&InterfaceAccount<'info, Mint>>,
+    token_program: &Program<'info, Token>,
+    token_program_2022: Option<&Program<'info, Token2022>>,
+    system_program: &Program<'info, System>,
+    amount: u64,
+) -> Result<()> {
+    if amount == 0 {
+        return Ok(());
+    }
+    let mut token_program_info = token_program.to_account_info();
+
+    // 如果手续费 mint 是 wSOL(native mint)，则直接转 SOL（lamports）给 sol_destination，而不是转 wSOL token
+    // 注意：wSOL 的最小单位与 lamports 等价（9 decimals）
+    if let Some(mint) = mint {
+        if mint.key() == anchor_spl::token::spl_token::native_mint::ID {
+            anchor_lang::system_program::transfer(
+                CpiContext::new(
+                    system_program.to_account_info(),
+                    anchor_lang::system_program::Transfer {
+                        from: signer.to_account_info(),
+                        to: fee_owner.to_account_info(),
+                    },
+                ),
+                amount,
+            )?;
+            return Ok(());
+        }
+    }
+
+    match (mint, token_program_2022) {
+        (Some(mint), Some(token_program_2022)) => {
+            if from.to_account_info().owner == token_program_2022.key {
+                token_program_info = token_program_2022.to_account_info()
+            }
+            token_2022::transfer_checked(
+                CpiContext::new(
+                    token_program_info,
+                    token_2022::TransferChecked {
+                        from: from.to_account_info(),
+                        to: to.to_account_info(),
+                        authority: signer.to_account_info(),
+                        mint: mint.to_account_info(),
+                    },
+                ),
+                amount,
+                mint.decimals,
+            )?;
+        }
+        _ => token::transfer(
+            CpiContext::new(
+                token_program_info,
+                token::Transfer {
+                    from: from.to_account_info(),
+                    to: to.to_account_info(),
+                    authority: signer.to_account_info(),
+                },
+            ),
+            amount,
+        )?,
+    }
+
+    Ok(())
 }

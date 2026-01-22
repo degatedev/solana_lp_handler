@@ -50,9 +50,9 @@ pub struct IncreaseLiquidityEvent {
     pub amount_0_in: u64,
     /// 用户输入的 token1 最大投入量（本次调用参数）
     pub amount_1_in: u64,
-    /// 期望把“剩余”统一兑换到的 mint（必须为 token0/token1 之一）
-    pub return_mint: Pubkey,
-    /// 最终退回给用户的 return_mint 数量（含“该币种剩余”+“另一币种 swap 后得到的数量”）
+    /// 可选：期望把“剩余”统一兑换到的 mint（若有，必须为 token0/token1 之一；None 表示不做剩余兑换）
+    pub return_mint: Option<Pubkey>,
+    /// 最终退回给用户的 return_mint 数量（None 时为 0）
     pub return_amount: u64,
 }
 

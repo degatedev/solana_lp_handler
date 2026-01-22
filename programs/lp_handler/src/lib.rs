@@ -12,7 +12,7 @@ use state::*;
 
 // ProgramId 需要与部署的 program keypair 对应的地址一致。
 // 本分支统一使用生产环境（mainnet）的 ProgramId。
-declare_id!("egtpTBeAYwAZo2EKGeFG26J3AdueVEjh27cADUPWURB");
+declare_id!("GPAdJwZpagBBCv3mK57PKKDLdXPLKVv1MSJu7GNJ4cU2");
 
 #[program]
 #[allow(deprecated)]
@@ -58,11 +58,13 @@ pub mod lp_handler {
         ctx: Context<'a, 'b, 'c, 'info, SwapAndDeposit<'info>>,
         amount_0_in: u64,
         amount_1_in: u64,
-        return_mint: Pubkey,
+        return_mint: Option<Pubkey>,
         tick_lower_index: i32,
         tick_upper_index: i32,
-        slippage_bps: u16,    // 滑点，单位为基点 (1 bps = 0.01%)
-        lp_slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
+        slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
+        swap_amount_in: u64,
+        swap_min_out: u64,
+        swap_input_is_token0: bool,
     ) -> Result<()> {
         let user = ctx.accounts.user.key();
         let position_nft_owner = ctx.accounts.position_nft_owner.key();
@@ -79,7 +81,9 @@ pub mod lp_handler {
                 tick_lower_index,
                 tick_upper_index,
                 slippage_bps,
-                lp_slippage_bps,
+                swap_amount_in,
+                swap_min_out,
+                swap_input_is_token0,
             )
         )
     }
@@ -123,11 +127,13 @@ pub mod lp_handler {
         ctx: Context<'a, 'b, 'c, 'info, IncreaseLiquidity<'info>>,
         amount_0_in: u64,
         amount_1_in: u64,
-        return_mint: Pubkey,
+        return_mint: Option<Pubkey>,
         tick_lower_index: i32,
         tick_upper_index: i32,
-        slippage_bps: u16,    // 滑点，单位为基点 (1 bps = 0.01%)
-        lp_slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
+        slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
+        swap_amount_in: u64,
+        swap_min_out: u64,
+        swap_input_is_token0: bool,
     ) -> Result<()> {
         let user = ctx.accounts.user.key();
         secure_entrypoint!(
@@ -142,8 +148,10 @@ pub mod lp_handler {
                 return_mint,
                 tick_lower_index,
                 tick_upper_index,
-                slippage_bps,    // 滑点，单位为基点 (1 bps = 0.01%)
-                lp_slippage_bps, // 滑点，单位为基点 (1 bps = 0.01%)
+                slippage_bps, // 滑点，单位为基点 (1 bps = 0.01%)
+                swap_amount_in,
+                swap_min_out,
+                swap_input_is_token0,
             )
         )
     }

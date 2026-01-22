@@ -12,7 +12,7 @@ use state::*;
 
 // ProgramId 需要与部署的 program keypair 对应的地址一致。
 // 本分支统一使用生产环境（mainnet）的 ProgramId。
-declare_id!("egtpTBeAYwAZo2EKGeFG26J3AdueVEjh27cADUPWURB");
+declare_id!("GPAdJwZpagBBCv3mK57PKKDLdXPLKVv1MSJu7GNJ4cU2");
 
 #[program]
 #[allow(deprecated)]
@@ -56,13 +56,15 @@ pub mod lp_handler {
     /// 使用 Raydium 的 liquidity_math 精确计算最优 swap 比例
     pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
         ctx: Context<'a, 'b, 'c, 'info, SwapAndDeposit<'info>>,
-        deposit_amount: u64,
-        deposit_mint: Pubkey,
+        amount_0_in: u64,
+        amount_1_in: u64,
+        return_mint: Option<Pubkey>,
         tick_lower_index: i32,
         tick_upper_index: i32,
-        liquidity: u128,
-        slippage_bps: u16,    // 滑点，单位为基点 (1 bps = 0.01%)
-        lp_slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
+        slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
+        swap_amount_in: u64,
+        swap_min_out: u64,
+        swap_input_is_token0: bool,
     ) -> Result<()> {
         let user = ctx.accounts.user.key();
         let position_nft_owner = ctx.accounts.position_nft_owner.key();
@@ -73,13 +75,15 @@ pub mod lp_handler {
             pool_states = &[ctx.accounts.pool_state.key()],
             body = instructions::swap_and_deposit(
                 ctx,
-                deposit_amount,
-                deposit_mint,
+                amount_0_in,
+                amount_1_in,
+                return_mint,
                 tick_lower_index,
                 tick_upper_index,
-                liquidity,
                 slippage_bps,
-                lp_slippage_bps,
+                swap_amount_in,
+                swap_min_out,
+                swap_input_is_token0,
             )
         )
     }
@@ -121,13 +125,15 @@ pub mod lp_handler {
 
     pub fn increase_liquidity<'a, 'b, 'c: 'info, 'info>(
         ctx: Context<'a, 'b, 'c, 'info, IncreaseLiquidity<'info>>,
-        deposit_amount: u64,
-        deposit_mint: Pubkey,
+        amount_0_in: u64,
+        amount_1_in: u64,
+        return_mint: Option<Pubkey>,
         tick_lower_index: i32,
         tick_upper_index: i32,
-        liquidity: u128,
-        slippage_bps: u16,    // 滑点，单位为基点 (1 bps = 0.01%)
-        lp_slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
+        slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
+        swap_amount_in: u64,
+        swap_min_out: u64,
+        swap_input_is_token0: bool,
     ) -> Result<()> {
         let user = ctx.accounts.user.key();
         secure_entrypoint!(
@@ -137,13 +143,15 @@ pub mod lp_handler {
             pool_states = &[ctx.accounts.pool_state.key()],
             body = instructions::increase_liquidity(
                 ctx,
-                deposit_amount,
-                deposit_mint,
+                amount_0_in,
+                amount_1_in,
+                return_mint,
                 tick_lower_index,
                 tick_upper_index,
-                liquidity,
-                slippage_bps,    // 滑点，单位为基点 (1 bps = 0.01%)
-                lp_slippage_bps, // 滑点，单位为基点 (1 bps = 0.01%)
+                slippage_bps, // 滑点，单位为基点 (1 bps = 0.01%)
+                swap_amount_in,
+                swap_min_out,
+                swap_input_is_token0,
             )
         )
     }

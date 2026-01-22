@@ -23,8 +23,6 @@ describe('pool_whitelist', () => {
           ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
           ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1000 }),
           initIx,
-          // updateIx,
-          // closeIx
         ]
       }).compileToV0Message()
     );
@@ -131,11 +129,11 @@ describe('pool_whitelist', () => {
       replaceRecentBlockhash: true,
       innerInstructions: true
     });
+
     const txResult = await connection.sendRawTransaction(tx.serialize(), {
       skipPreflight: false
     });
-    console.log('transactionResult', txResult, );
-
+    console.log('txResult', txResult);
     // 这个测试的目标是“指令可构造 + 可跑到合约入口”。
     // 在 mainnet 上 PDA 可能已存在/authority 可能不匹配，simulate 可能失败；所以不强制要求 err==null。
     expect(sim.value.logs).toBeDefined();

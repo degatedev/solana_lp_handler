@@ -17,13 +17,15 @@ use super::zap_common;
 /// 包含 swap_v2 和 open_position_v2 的全部账户（有些可以复用，比如 pool_state、token_program 等）
 #[derive(Accounts)]
 #[instruction(
-    deposit_amount: u64,
-    deposit_mint: Pubkey,
+    amount_0_in: u64,
+    amount_1_in: u64,
+    return_mint: Option<Pubkey>,
     tick_lower_index: i32,
     tick_upper_index: i32,
-    liquidity:i128,
     slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
-    lp_slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
+    swap_amount_in: u64,
+    swap_min_out: u64,
+    swap_input_is_token0: bool,
 )]
 pub struct SwapAndDeposit<'info> {
     // ========== 公共账户 ==========
@@ -161,13 +163,15 @@ crate::impl_zap_common_accounts!(SwapAndDeposit<'info>);
 /// 使用 Raydium 的 liquidity_math 精确计算最优 swap 比例
 pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
     ctx: Context<'a, 'b, 'c, 'info, SwapAndDeposit<'info>>,
-    deposit_amount: u64,
-    deposit_mint: Pubkey,
+    amount_0_in: u64,
+    amount_1_in: u64,
+    return_mint: Option<Pubkey>,
     tick_lower_index: i32,
     tick_upper_index: i32,
-    liquidity: u128,
-    slippage_bps: u16,    // 滑点，单位为基点 (1 bps = 0.01%)
-    lp_slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
+    slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
+    swap_amount_in: u64,
+    swap_min_out: u64,
+    swap_input_is_token0: bool,
 ) -> Result<()> {
     // 校验 position_nft_account 必须是 (position_nft_owner, position_nft_mint, Token2022) 的 ATA 地址
     // 注意：该 ATA 可能尚未初始化（由下游 CPI 创建），因此只校验地址本身，不校验 owner/program。
@@ -186,13 +190,15 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
     let plan = zap_common::prepare_zap_plan_and_swap_if_needed(
         &mut *ctx.accounts,
         ctx.remaining_accounts,
-        deposit_amount,
-        deposit_mint,
+        amount_0_in,
+        amount_1_in,
+        return_mint,
         tick_lower_index,
         tick_upper_index,
-        liquidity,
         slippage_bps,
-        lp_slippage_bps,
+        swap_amount_in,
+        swap_min_out,
+        swap_input_is_token0,
     )?;
 
     let tick_array_lower_start_index =
@@ -220,14 +226,15 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
     let position_nft_mint = ctx.accounts.position_nft_mint.key();
     let _return_amount = zap_common::swap_back_remaining_and_emit_increase_event(
         &mut *ctx.accounts,
-        deposit_amount,
+        amount_0_in,
+        amount_1_in,
+        return_mint,
         tick_lower_index,
         tick_upper_index,
-        liquidity,
+        plan.computed_liquidity,
         slippage_bps,
-        plan.is_token0,
-        plan.balance_0_before,
-        plan.balance_1_before,
+        plan.balance_0_pre_cpi,
+        plan.balance_1_pre_cpi,
         plan.amount_0_max,
         plan.amount_1_max,
         plan.swap_remaining,

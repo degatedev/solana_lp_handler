@@ -6,7 +6,7 @@ npm run  deploy
 #关闭合约之前执行 安全配置账户回收租金
 
 # 关闭合约
-solana program close egtpTBeAYwAZo2EKGeFG26J3AdueVEjh27cADUPWURB --recipient CB5HJVasNzZ7nWJHJTvuiKm4vF9yb5YFqc9jnnPScKpB --bypass-warning
+solana program close GPAdJwZpagBBCv3mK57PKKDLdXPLKVv1MSJu7GNJ4cU2 --recipient CB5HJVasNzZ7nWJHJTvuiKm4vF9yb5YFqc9jnnPScKpB --bypass-warning
 
 # 创建程序id
 solana-keygen new --no-bip39-passphrase --silent -o ./id/lp_handler-keypair.json

@@ -56,11 +56,11 @@ pub mod lp_handler {
     /// 使用 Raydium 的 liquidity_math 精确计算最优 swap 比例
     pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
         ctx: Context<'a, 'b, 'c, 'info, SwapAndDeposit<'info>>,
-        deposit_amount: u64,
-        deposit_mint: Pubkey,
+        amount_0_in: u64,
+        amount_1_in: u64,
+        return_mint: Pubkey,
         tick_lower_index: i32,
         tick_upper_index: i32,
-        liquidity: u128,
         slippage_bps: u16,    // 滑点，单位为基点 (1 bps = 0.01%)
         lp_slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
     ) -> Result<()> {
@@ -73,11 +73,11 @@ pub mod lp_handler {
             pool_states = &[ctx.accounts.pool_state.key()],
             body = instructions::swap_and_deposit(
                 ctx,
-                deposit_amount,
-                deposit_mint,
+                amount_0_in,
+                amount_1_in,
+                return_mint,
                 tick_lower_index,
                 tick_upper_index,
-                liquidity,
                 slippage_bps,
                 lp_slippage_bps,
             )
@@ -121,11 +121,11 @@ pub mod lp_handler {
 
     pub fn increase_liquidity<'a, 'b, 'c: 'info, 'info>(
         ctx: Context<'a, 'b, 'c, 'info, IncreaseLiquidity<'info>>,
-        deposit_amount: u64,
-        deposit_mint: Pubkey,
+        amount_0_in: u64,
+        amount_1_in: u64,
+        return_mint: Pubkey,
         tick_lower_index: i32,
         tick_upper_index: i32,
-        liquidity: u128,
         slippage_bps: u16,    // 滑点，单位为基点 (1 bps = 0.01%)
         lp_slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
     ) -> Result<()> {
@@ -137,11 +137,11 @@ pub mod lp_handler {
             pool_states = &[ctx.accounts.pool_state.key()],
             body = instructions::increase_liquidity(
                 ctx,
-                deposit_amount,
-                deposit_mint,
+                amount_0_in,
+                amount_1_in,
+                return_mint,
                 tick_lower_index,
                 tick_upper_index,
-                liquidity,
                 slippage_bps,    // 滑点，单位为基点 (1 bps = 0.01%)
                 lp_slippage_bps, // 滑点，单位为基点 (1 bps = 0.01%)
             )

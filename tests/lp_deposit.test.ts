@@ -208,8 +208,10 @@ describe('lp_deposit', () => {
         2
       )
     );
+    const amount0In = deposit_token_mint.equals(new PublicKey(poolKeys.mintA.address)) ? new BN(deposit_amount) : new BN(0);
+    const amount1In = deposit_token_mint.equals(new PublicKey(poolKeys.mintB.address)) ? new BN(deposit_amount) : new BN(0);
     const instruction = await program.methods
-      .swapAndDeposit(new BN(deposit_amount), deposit_token_mint, tickLower, tickUpper, res2.liquidity, slippage,slippage)
+      .swapAndDeposit(amount0In, amount1In, deposit_token_mint, tickLower, tickUpper, slippage, slippage)
       .accountsStrict(accounts)
       .remainingAccounts(remainingAccounts)
       .instruction();
@@ -253,6 +255,12 @@ describe('lp_deposit', () => {
     console.log('txResult', txResult);
     console.log('transactionResult', transactionResult.value.logs);
   }, 500000);
+
+  it.skip('two-sided input example (manual funding required)', async () => {
+    // 说明：这是“双币输入”接口示例。
+    // 运行该用例前，需要确保 user 同时持有 pool 的 token0/token1，并准备好对应 ATA。
+    await program.methods.swapAndDeposit(new BN(1), new BN(1), deposit_token_mint, 0, 1, slippage, slippage);
+  });
 
   test('parse log test', async () => {
     // 498PU5rrcysb6vaL77DRRfpiF296in484oPqWcNyZTgBvhaa5djiHXLhXHtYaRp35d6AaeduPpbkNrr7nKYfcHMG

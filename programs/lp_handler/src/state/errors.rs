@@ -14,6 +14,9 @@ pub enum LpDepositError {
     #[msg("Invalid deposit mint")]
     InvalidDepositMint,
 
+    #[msg("Invalid deposit amount")]
+    InvalidDepositAmount,
+
     #[msg("Invalid position nft owner")]
     InvalidPositionNftOwner,
 

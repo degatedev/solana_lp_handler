@@ -169,8 +169,10 @@ describe('lp_increase_liquidity', () => {
     }
 
   
+    const amount0In = deposit_token_mint.equals(new PublicKey(poolKeys.mintA.address)) ? new BN(deposit_amount) : new BN(0);
+    const amount1In = deposit_token_mint.equals(new PublicKey(poolKeys.mintB.address)) ? new BN(deposit_amount) : new BN(0);
     const instruction = await program.methods
-      .increaseLiquidity(new BN(deposit_amount), deposit_token_mint, tickLower, tickUpper, res2.liquidity, slippage,slippage)
+      .increaseLiquidity(amount0In, amount1In, deposit_token_mint, tickLower, tickUpper, slippage, slippage)
       .accountsStrict({
         raydiumClmmProgram: CLMM_PROGRAM_ID,
         memoProgram: MEMO_PROGRAM_ID,
@@ -237,6 +239,12 @@ describe('lp_increase_liquidity', () => {
     console.log('txResult', txResult);
     console.log('transactionResult', transactionResult.value.logs);
   }, 500000);
+
+  it.skip('two-sided input example (manual funding required)', async () => {
+    // 说明：这是“双币输入”接口示例。
+    // 运行该用例前，需要确保 user 同时持有 pool 的 token0/token1，并准备好对应 ATA。
+    await program.methods.increaseLiquidity(new BN(1), new BN(1), deposit_token_mint, 0, 1, slippage, slippage);
+  });
 
   test('parse log test', async () => {
     // 498PU5rrcysb6vaL77DRRfpiF296in484oPqWcNyZTgBvhaa5djiHXLhXHtYaRp35d6AaeduPpbkNrr7nKYfcHMG

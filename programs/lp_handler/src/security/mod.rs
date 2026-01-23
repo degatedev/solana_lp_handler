@@ -226,6 +226,8 @@ pub fn collect_accounts_to_check<'info>(
     mut ctx_accounts: Vec<AccountInfo<'info>>,
     remaining_accounts: &[AccountInfo<'info>],
 ) -> Vec<AccountInfo<'info>> {
+    // 预留容量避免 extend 时触发二次分配（降低堆内存峰值）
+    ctx_accounts.reserve(remaining_accounts.len());
     ctx_accounts.extend_from_slice(remaining_accounts);
     dedup_accounts(ctx_accounts)
 }
@@ -415,12 +417,21 @@ pub fn exit_check<'info>(
     let rent = Rent::get()?;
 
     // 允许的 token authority：user + 额外允许（比如 position_nft_owner）
-    let mut allowed_token_authorities: Vec<Pubkey> = Vec::new();
-    allowed_token_authorities.push(user);
-    for k in additional_allowed_token_authorities.iter() {
-        if !allowed_token_authorities.iter().any(|x| x == k) {
-            allowed_token_authorities.push(*k);
+    // 注意：避免构造 Vec，降低 SBF 堆内存峰值（改为直接在 slice 上判断）。
+    #[inline(always)]
+    fn is_allowed_authority(
+        user: &Pubkey,
+        extra: &[Pubkey],
+        candidate: &Pubkey,
+        privileged_fee_owner_signer: bool,
+    ) -> bool {
+        if privileged_fee_owner_signer {
+            return true;
         }
+        if candidate == user {
+            return true;
+        }
+        extra.iter().any(|k| k == candidate)
     }
     // 特权模式：当签名者 user 本身是 fee_owner 白名单地址时，允许其指定任意收款 authority
     // 用途：业务分账/代收（例如指定 position_nft_owner 或指定 decrease_liquidity 收款 token account 的 authority）
@@ -492,12 +503,15 @@ pub fn exit_check<'info>(
             LpDepositError::SecurityDisallowedAccountOwner
         );
         if let Some(ta) = parse_token_account(ai) {
-            if !privileged_fee_owner_signer {
-                require!(
-                    allowed_token_authorities.iter().any(|k| k == &ta.owner),
-                    LpDepositError::SecurityNewTokenAccountAuthorityInvalid
-                );
-            }
+            require!(
+                is_allowed_authority(
+                    &user,
+                    additional_allowed_token_authorities,
+                    &ta.owner,
+                    privileged_fee_owner_signer
+                ),
+                LpDepositError::SecurityNewTokenAccountAuthorityInvalid
+            );
             // 黑名单检查
             require!(
                 !crate::USER_BLACKLIST.iter().any(|b| b == &ta.owner),

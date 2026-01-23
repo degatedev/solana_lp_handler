@@ -227,6 +227,7 @@ describe('lp_claim', () => {
         payerKey: user,
         recentBlockhash: (await connection.getLatestBlockhash()).blockhash,
         instructions: [
+          ComputeBudgetProgram.requestHeapFrame({ bytes: 256 * 1024 }),
           ComputeBudgetProgram.setComputeUnitLimit({
             units: 450_000
           }),

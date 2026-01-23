@@ -7,7 +7,9 @@ use anchor_spl::token_interface::{Mint, TokenAccount};
 use raydium_amm_v3::program::AmmV3;
 
 use super::zap_common;
-use crate::{is_fee_owner, utils, DecreaseLiquidityEvent, LpDepositError, SECURITY_CONFIG_SEED};
+use crate::{
+    is_fee_owner, utils, LpDepositError, LpHandlerDecreaseLiquidityEvent, SECURITY_CONFIG_SEED,
+};
 use raydium_amm_v3::cpi as clmm_cpi;
 use raydium_amm_v3::cpi::accounts as clmm_accounts;
 use raydium_amm_v3::states::{
@@ -317,13 +319,6 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
     if convert_to_usdc {
         // 兑换到目标币种后再扣手续费（手续费从“最终到手的 reward”中抽取，且用目标币种结算）
         let target_is_token0 = ctx.accounts.vault_0_mint.key() == swap_to_token_mint;
-        msg!(
-            "target_is_token0: {}, vault_0_mint: {}, swap_to_token_mint: {}",
-            target_is_token0,
-            ctx.accounts.vault_0_mint.key(),
-            swap_to_token_mint
-        );
-
         // 分两段 swap：先把“奖励部分”换成目标币种（便于精确扣费），再把“本金部分”换成目标币种。
         // 注意：这里的 swap 输入来自 decrease_liquidity_v2 后的增量（user_token*_amount），不会动到用户原有余额。
         let (reward_other_in, principal_other_in, reward_target_direct) = if target_is_token0 {
@@ -504,17 +499,22 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             let reward_amount_0 = reward_total_in_target
                 .checked_sub(integrator_fee_target)
                 .ok_or(LpDepositError::MathOverflow)?;
-            emit!(DecreaseLiquidityEvent {
+            emit!(LpHandlerDecreaseLiquidityEvent {
                 user: ctx.accounts.user.key(),
                 pool: ctx.accounts.pool_state.key(),
                 token0_mint: ctx.accounts.vault_0_mint.key(),
                 token1_mint: ctx.accounts.vault_1_mint.key(),
-                principal_amount_0,
-                principal_amount_1: 0,
-                integrator_fee_0: integrator_fee_target,
-                integrator_fee_1: 0,
-                reward_amount_0,
-                reward_amount_1: 0,
+                settle_mint: Some(swap_to_token_mint),
+                principal_pre_0: principal_expected_0,
+                principal_pre_1: principal_expected_1,
+                reward_pre_fee_0: reward_gross_0,
+                reward_pre_fee_1: reward_gross_1,
+                principal_settled_0: principal_amount_0,
+                principal_settled_1: 0,
+                reward_settled_0: reward_amount_0,
+                reward_settled_1: 0,
+                fee_settled_0: integrator_fee_target,
+                fee_settled_1: 0,
             });
         } else {
             let principal_amount_1 = principal_expected_1
@@ -523,17 +523,22 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             let reward_amount_1 = reward_total_in_target
                 .checked_sub(integrator_fee_target)
                 .ok_or(LpDepositError::MathOverflow)?;
-            emit!(DecreaseLiquidityEvent {
+            emit!(LpHandlerDecreaseLiquidityEvent {
                 user: ctx.accounts.user.key(),
                 pool: ctx.accounts.pool_state.key(),
                 token0_mint: ctx.accounts.vault_0_mint.key(),
                 token1_mint: ctx.accounts.vault_1_mint.key(),
-                principal_amount_0: 0,
-                principal_amount_1,
-                integrator_fee_0: 0,
-                integrator_fee_1: integrator_fee_target,
-                reward_amount_0: 0,
-                reward_amount_1,
+                settle_mint: Some(swap_to_token_mint),
+                principal_pre_0: principal_expected_0,
+                principal_pre_1: principal_expected_1,
+                reward_pre_fee_0: reward_gross_0,
+                reward_pre_fee_1: reward_gross_1,
+                principal_settled_0: 0,
+                principal_settled_1: principal_amount_1,
+                reward_settled_0: 0,
+                reward_settled_1: reward_amount_1,
+                fee_settled_0: 0,
+                fee_settled_1: integrator_fee_target,
             });
         }
         zap_common::unwrap_wsol_ata_if_needed(
@@ -600,17 +605,22 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
         let reward_amount_1 = reward_gross_1
             .checked_sub(integrator_fee_1)
             .ok_or(LpDepositError::MathOverflow)?;
-        emit!(DecreaseLiquidityEvent {
+        emit!(LpHandlerDecreaseLiquidityEvent {
             user: ctx.accounts.user.key(),
             pool: ctx.accounts.pool_state.key(),
             token0_mint: ctx.accounts.vault_0_mint.key(),
             token1_mint: ctx.accounts.vault_1_mint.key(),
-            principal_amount_0,
-            principal_amount_1,
-            integrator_fee_0,
-            integrator_fee_1,
-            reward_amount_0,
-            reward_amount_1,
+            settle_mint: None,
+            principal_pre_0: principal_expected_0,
+            principal_pre_1: principal_expected_1,
+            reward_pre_fee_0: reward_gross_0,
+            reward_pre_fee_1: reward_gross_1,
+            principal_settled_0: principal_amount_0,
+            principal_settled_1: principal_amount_1,
+            reward_settled_0: reward_amount_0,
+            reward_settled_1: reward_amount_1,
+            fee_settled_0: integrator_fee_0,
+            fee_settled_1: integrator_fee_1,
         });
     }
 

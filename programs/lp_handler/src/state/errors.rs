@@ -38,6 +38,9 @@ pub enum LpDepositError {
     #[msg("Invalid remaining accounts")]
     InvalidRemainingAccounts,
 
+    #[msg("Event log serialization failed")]
+    EventLogSerializeFailed,
+
     #[msg("Invalid sqrt price")]
     InvalidSqrtPrice,
 

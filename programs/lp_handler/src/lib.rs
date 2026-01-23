@@ -12,7 +12,7 @@ use state::*;
 
 // ProgramId 需要与部署的 program keypair 对应的地址一致。
 // 本分支统一使用生产环境（mainnet）的 ProgramId。
-declare_id!("GPAdJwZpagBBCv3mK57PKKDLdXPLKVv1MSJu7GNJ4cU2");
+declare_id!("GuRdyEyQ3CRTbU8UJnxbUaRZHdc9s9VgpGF1WJh4NZc5");
 
 #[program]
 #[allow(deprecated)]
@@ -32,15 +32,14 @@ pub mod lp_handler {
             pool_states = $pools:expr,
             body = $body:expr
         ) => {{
-            let remaining_accounts = $ctx.remaining_accounts.to_vec();
             let accounts = sec::collect_accounts_to_check(
                 $ctx.accounts.to_account_infos(),
-                &remaining_accounts,
+                $ctx.remaining_accounts,
             );
             let policy = sec::resolve_policy(&accounts)?;
             let snapshot = sec::entry_check_and_snapshot(
                 &accounts,
-                &remaining_accounts,
+                $ctx.remaining_accounts,
                 $pools,
                 $user,
                 $extra,

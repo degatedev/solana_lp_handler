@@ -11,7 +11,7 @@ use raydium_amm_v3::libraries::{get_sqrt_price_at_tick, liquidity_math};
 use raydium_amm_v3::program::AmmV3;
 use raydium_amm_v3::states::{AmmConfig, ObservationState, PoolState};
 
-use crate::{utils, IncreaseLiquidityEvent, LpDepositError, SwapExecutedEvent};
+use crate::{utils, LpDepositError, LpHandlerIncreaseLiquidityEvent};
 
 /// 两个指令（`swap_and_deposit` / `increase_liquidity`）共享的账户访问接口。
 ///
@@ -302,18 +302,6 @@ pub fn prepare_zap_plan_and_swap_if_needed<'info>(
             );
         }
 
-        emit!(SwapExecutedEvent {
-            user: accounts.user().key(),
-            pool: accounts.pool_state().key(),
-            amount_in: spent_in,
-            amount_out: amount_out_after,
-            amount_out_min: exec_swap_min_out,
-            is_token0_input: exec_swap_input_is_token0,
-            token0_mint: accounts.vault_0_mint().key(),
-            token1_mint: accounts.vault_1_mint().key(),
-            slippage_bps,
-        });
-
         // 计算 CPI 可用的 max（= 输入预算经过 swap 后的可用额度）
         if exec_swap_input_is_token0 {
             // token0 -> token1：token0 减少 swap_in，token1 增加 out
@@ -494,12 +482,12 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
         }
     }
 
-    emit!(IncreaseLiquidityEvent {
+    emit!(LpHandlerIncreaseLiquidityEvent {
         user: accounts.user().key(),
         pool: accounts.pool_state().key(),
         position_nft_mint,
-        amount_0: spent_0,
-        amount_1: spent_1,
+        principal_0: spent_0,
+        principal_1: spent_1,
         token0_mint: vault0,
         token1_mint: vault1,
         tick_lower_index,

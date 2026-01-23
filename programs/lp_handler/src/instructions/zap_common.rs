@@ -381,7 +381,7 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
     amount_0_max: u64,
     amount_1_max: u64,
     swap_remaining: Vec<AccountInfo<'info>>,
-    position_nft_mint: Option<Pubkey>,
+    position_nft_mint: Pubkey,
 ) -> Result<u64> {
     accounts.user_token0_account().reload()?;
     accounts.user_token1_account().reload()?;

@@ -10,7 +10,7 @@ pub struct LpHandlerIncreaseLiquidityEvent {
     /// Pool 地址
     pub pool: Pubkey,
     /// Position NFT mint 地址
-    pub position_nft_mint: Option<Pubkey>,
+    pub position_nft_mint: Pubkey,
     /// 实际添加的 token0 数量
     pub principal_0: u64,
     /// 实际添加的 token1 数量

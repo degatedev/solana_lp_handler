@@ -238,7 +238,7 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
         plan.amount_0_max,
         plan.amount_1_max,
         plan.swap_remaining,
-        Some(position_nft_mint),
+        position_nft_mint,
     )?;
 
     Ok(())

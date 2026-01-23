@@ -192,6 +192,9 @@ pub fn increase_liquidity<'a, 'b, 'c: 'info, 'info>(
         plan.action_remaining,
     )?;
 
+    // 先取出 mint，避免后续 `&mut *ctx.accounts` 借用期间再借用 ctx.accounts
+    let position_nft_mint = ctx.accounts.position_nft_account.mint;
+
     zap_common::swap_back_remaining_and_emit_increase_event(
         &mut *ctx.accounts,
         amount_0_in,
@@ -206,7 +209,7 @@ pub fn increase_liquidity<'a, 'b, 'c: 'info, 'info>(
         plan.amount_0_max,
         plan.amount_1_max,
         plan.swap_remaining,
-        None,
+        position_nft_mint,
     )?;
 
     Ok(())

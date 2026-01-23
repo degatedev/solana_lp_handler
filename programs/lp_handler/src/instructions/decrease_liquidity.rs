@@ -319,7 +319,9 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
     if convert_to_usdc {
         // 兑换到目标币种后再扣手续费（手续费从“最终到手的 reward”中抽取，且用目标币种结算）
         let target_is_token0 = ctx.accounts.vault_0_mint.key() == swap_to_token_mint;
-        // 分两段 swap：先把“奖励部分”换成目标币种（便于精确扣费），再把“本金部分”换成目标币种。
+        // 合并两段 swap，把“other token”一次性换成目标币种；
+        // 然后按 (reward_other_in / total_other_in) 的比例把 swap 输出近似拆分为 reward/principal，
+        // fee 仍然只对 reward 口径计提。
         // 注意：这里的 swap 输入来自 decrease_liquidity_v2 后的增量（user_token*_amount），不会动到用户原有余额。
         let (reward_other_in, principal_other_in, reward_target_direct) = if target_is_token0 {
             // token1 -> token0
@@ -339,35 +341,37 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
 
         let input_is_token0 = !target_is_token0; // 目标是 token0 => 输入 token1；目标是 token1 => 输入 token0
 
-        // 记录兑换前目标币种余额，用于计算 reward/principal 兑换的实际输出
+        // 记录兑换前目标币种余额，用于计算 swap 的实际输出
         let target_balance_before_swap = if target_is_token0 {
             ctx.accounts.user_token0_account.amount
         } else {
             ctx.accounts.user_token1_account.amount
         };
 
-        // 1) 先换 reward（如果有）
-        let mut reward_out_in_target: u64 = 0;
-        if reward_other_in > 0 {
+        // 1) 合并 swap：把 other token 的增量一次性兑换成目标币种（若 total_other_in == 0 则不 swap）
+        let total_other_in = reward_other_in
+            .checked_add(principal_other_in)
+            .ok_or(LpDepositError::MathOverflow)?;
+        let mut total_out_in_target: u64 = 0;
+        if total_other_in > 0 {
             // 为了避免“用旧价格估 min_out”导致过严/过松，在 CPI swap_v2 前重新读取 pool_state 的最新价格。
             let sqrt_price_x64_for_min_out = {
                 let pool_state = ctx.accounts.pool_state.load()?;
                 pool_state.sqrt_price_x64
             };
             let swap_other_amount_threshold = utils::calc_min_amount_out(
-                reward_other_in,
+                total_other_in,
                 input_is_token0,
                 sqrt_price_x64_for_min_out,
                 slippage_bps,
                 ctx.accounts.amm_config.trade_fee_rate,
             )?;
 
-            // dust 保护：如果预估的最小输出太小，则不执行 swap，直接把 reward_other_in 转给手续费地址
-            if swap_other_amount_threshold == 0 {
-                msg!(
-                    "skip reward swap: amount_out_min {} =0, transfer input to fee",
-                    swap_other_amount_threshold,
-                );
+            // dust 处理：
+            // - 合并 swap 后，若同时包含 principal，则不能把输入直接转给 fee（会误伤本金）
+            // - 但在“纯领取奖励”（principal_other_in==0）场景下，可以保留原逻辑：当 min_out==0 时直接把 reward_other_in 转给 fee
+            if principal_other_in == 0 && swap_other_amount_threshold == 0 {
+                msg!("skip reward swap (claim-only dust): amount_out_min=0, transfer input to fee");
                 zap_common::transfer_fee(
                     &ctx.accounts.user,
                     &ctx.accounts.fee_owner,
@@ -389,12 +393,12 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
                     &ctx.accounts.token_program,
                     Some(&ctx.accounts.token_program_2022),
                     &ctx.accounts.system_program,
-                    reward_other_in,
+                    total_other_in, // == reward_other_in
                 )?;
             } else {
                 swap_v2(
                     &ctx,
-                    reward_other_in,
+                    total_other_in,
                     swap_other_amount_threshold,
                     0,
                     input_is_token0,
@@ -402,20 +406,34 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
                 )?;
                 ctx.accounts.user_token0_account.reload()?;
                 ctx.accounts.user_token1_account.reload()?;
-                let target_balance_after_reward_swap = if target_is_token0 {
+                let target_balance_after_swap = if target_is_token0 {
                     ctx.accounts.user_token0_account.amount
                 } else {
                     ctx.accounts.user_token1_account.amount
                 };
-                reward_out_in_target = target_balance_after_reward_swap
+                total_out_in_target = target_balance_after_swap
                     .checked_sub(target_balance_before_swap)
                     .ok_or(LpDepositError::MathOverflow)?;
             }
         }
 
-        // 2) reward 已全部在目标币种：计算并扣 fee（只对 reward 抽成）
+        // 2) 近似拆分 swap 输出：reward_out ≈ total_out * reward_other_in / total_other_in
+        let reward_out_in_target_est = if total_other_in == 0 || reward_other_in == 0 {
+            0u64
+        } else {
+            let num = (total_out_in_target as u128)
+                .checked_mul(reward_other_in as u128)
+                .ok_or(LpDepositError::MathOverflow)?;
+            let den = total_other_in as u128;
+            (num / den) as u64
+        };
+        let principal_out_in_target_est = total_out_in_target
+            .checked_sub(reward_out_in_target_est)
+            .ok_or(LpDepositError::MathOverflow)?;
+
+        // 3) fee 仍按 reward 口径计提（reward_direct + reward_out_est）
         let reward_total_in_target = reward_target_direct
-            .checked_add(reward_out_in_target)
+            .checked_add(reward_out_in_target_est)
             .ok_or(LpDepositError::MathOverflow)?;
         let integrator_fee_target = reward_total_in_target
             .checked_mul(fee_percent as u64)
@@ -447,54 +465,10 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             integrator_fee_target,
         )?;
 
-        // 3) 再换本金（如果有）。为避免把已换出的 reward 再算一遍，这里只换剩余的 other token 增量。
-        // 重新读取目标币种余额，用于计算本金兑换输出
-        ctx.accounts.user_token0_account.reload()?;
-        ctx.accounts.user_token1_account.reload()?;
-        let target_balance_before_principal_swap = if target_is_token0 {
-            ctx.accounts.user_token0_account.amount
-        } else {
-            ctx.accounts.user_token1_account.amount
-        };
-        let mut principal_out_in_target: u64 = 0;
-        if principal_other_in > 0 {
-            // 为了避免“用旧价格估 min_out”导致过严/过松，在 CPI swap_v2 前重新读取 pool_state 的最新价格。
-            // 注：本次 swap 可能紧跟 reward swap 之后，因此必须再次读取。
-            let sqrt_price_x64_for_min_out = {
-                let pool_state = ctx.accounts.pool_state.load()?;
-                pool_state.sqrt_price_x64
-            };
-            let swap_other_amount_threshold = utils::calc_min_amount_out(
-                principal_other_in,
-                input_is_token0,
-                sqrt_price_x64_for_min_out,
-                slippage_bps,
-                ctx.accounts.amm_config.trade_fee_rate,
-            )?;
-            swap_v2(
-                &ctx,
-                principal_other_in,
-                swap_other_amount_threshold,
-                0,
-                input_is_token0,
-                swap_remaining.to_vec(),
-            )?;
-            ctx.accounts.user_token0_account.reload()?;
-            ctx.accounts.user_token1_account.reload()?;
-            let target_balance_after_principal_swap = if target_is_token0 {
-                ctx.accounts.user_token0_account.amount
-            } else {
-                ctx.accounts.user_token1_account.amount
-            };
-            principal_out_in_target = target_balance_after_principal_swap
-                .checked_sub(target_balance_before_principal_swap)
-                .ok_or(LpDepositError::MathOverflow)?;
-        }
-
         // 事件按“兑换后”口径输出：只在目标币种上体现 principal/reward/fee，其它币种为 0
         if target_is_token0 {
             let principal_amount_0 = principal_expected_0
-                .checked_add(principal_out_in_target)
+                .checked_add(principal_out_in_target_est)
                 .ok_or(LpDepositError::MathOverflow)?;
             let reward_amount_0 = reward_total_in_target
                 .checked_sub(integrator_fee_target)
@@ -518,7 +492,7 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             });
         } else {
             let principal_amount_1 = principal_expected_1
-                .checked_add(principal_out_in_target)
+                .checked_add(principal_out_in_target_est)
                 .ok_or(LpDepositError::MathOverflow)?;
             let reward_amount_1 = reward_total_in_target
                 .checked_sub(integrator_fee_target)

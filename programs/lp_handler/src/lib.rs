@@ -23,13 +23,13 @@ pub mod lp_handler {
     ///
     /// - **user**: 本次指令的签名者（用于权限对账/黑名单）
     /// - **extra_authorities**: 业务允许出现的“新增 token account authority”白名单补充（如 `position_nft_owner`、`fee_owner`）
-    /// - **pool_states**: 本次业务涉及的 pool_state（用于 pool 白名单校验）
+    /// - **pool_state**: 本次业务涉及的 pool_state（用于 pool 白名单校验）
     macro_rules! secure_entrypoint {
         (
             $ctx:expr,
             user = $user:expr,
             extra_authorities = $extra:expr,
-            pool_states = $pools:expr,
+            pool_state = $pool:expr,
             body = $body:expr
         ) => {{
             let accounts = sec::collect_accounts_to_check(
@@ -40,7 +40,7 @@ pub mod lp_handler {
             let snapshot = sec::entry_check_and_snapshot(
                 &accounts,
                 $ctx.remaining_accounts,
-                $pools,
+                $pool,
                 $user,
                 $extra,
                 &policy,
@@ -73,8 +73,8 @@ pub mod lp_handler {
         secure_entrypoint!(
             ctx,
             user = user,
-            extra_authorities = &[position_nft_owner, vault0_authority, vault1_authority],
-            pool_states = &[ctx.accounts.pool_state.key()],
+            extra_authorities = &[position_nft_owner],
+            pool_state = &ctx.accounts.pool_state,
             body = instructions::swap_and_deposit(
                 ctx,
                 amount_0_in,
@@ -113,8 +113,8 @@ pub mod lp_handler {
         secure_entrypoint!(
             ctx,
             user = user,
-            extra_authorities = &[fee_owner, vault0_authority, vault1_authority],
-            pool_states = &[ctx.accounts.pool_state.key()],
+            extra_authorities = &[fee_owner],
+            pool_state = &ctx.accounts.pool_state,
             body = instructions::decrease_liquidity(
                 ctx,
                 liquidity,
@@ -147,8 +147,8 @@ pub mod lp_handler {
         secure_entrypoint!(
             ctx,
             user = user,
-            extra_authorities = &[vault0_authority, vault1_authority],
-            pool_states = &[ctx.accounts.pool_state.key()],
+            extra_authorities = &[],
+            pool_state = &ctx.accounts.pool_state,
             body = instructions::increase_liquidity(
                 ctx,
                 amount_0_in,

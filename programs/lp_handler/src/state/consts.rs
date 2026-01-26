@@ -56,10 +56,5 @@ pub const ALLOWED_ACCOUNT_OWNERS: &[Pubkey] = &[
     raydium_amm_v3::ID,
 ];
 
-/// 允许的 Raydium pool_state 白名单（空 = 不限制）
-pub const ALLOWED_POOLS: &[Pubkey] = &[
-    // pubkey!("3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv"), // example
-];
-
 /// 黑名单用户（空 = 不限制）
 pub const USER_BLACKLIST: &[Pubkey] = &[];

@@ -1,6 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_pack::Pack;
 use anchor_spl::token_2022::spl_token_2022::extension::BaseStateWithExtensions;
+use raydium_amm_v3::states::PoolState;
 
 use crate::LpDepositError;
 
@@ -246,17 +247,21 @@ pub fn resolve_policy<'info>(accounts: &[AccountInfo<'info>]) -> Result<Security
 ///
 /// - `accounts`: `ctx.accounts` + `ctx.remaining_accounts` 合并去重后的账户集合
 /// - `remaining_accounts`: 原始 `ctx.remaining_accounts`（用于分隔符账户等专项检查）
-/// - `pool_states`: 本次业务涉及的 pool_state（用于 pool 白名单校验）
+/// - `pool_state`: 本次业务涉及的 pool_state（用于 pool 白名单校验）
 /// - `user`: 本次指令签名者（用于黑名单/权限对账）
 /// - `additional_allowed_token_authorities`: 业务允许出现的“新增 token account authority”补充白名单
 pub fn entry_check_and_snapshot<'info>(
     accounts: &[AccountInfo<'info>],
     remaining_accounts: &[AccountInfo<'info>],
-    pool_states: &[Pubkey],
+    pool_state: &AccountLoader<'info, PoolState>,
     user: Pubkey,
     additional_allowed_token_authorities: &[Pubkey],
     _policy: &SecurityPolicy,
 ) -> Result<SecuritySnapshot> {
+    let pool_state_key = pool_state.key();
+
+    // 签名者是否是fee_owner
+    let privileged_fee_owner_signer = crate::is_fee_owner(&user);
     // remaining_accounts 分隔符（crate::ID）约束：若出现，则必须唯一、只读
     let sep_cnt = remaining_accounts
         .iter()
@@ -296,12 +301,10 @@ pub fn entry_check_and_snapshot<'info>(
         let data = cfg_ai.data.borrow();
         let n = security_config_pools_len(&data)?;
         if n != 0 {
-            for p in pool_states.iter() {
-                require!(
-                    security_config_contains(&data, n, p),
-                    LpDepositError::SecurityPoolNotAllowed
-                );
-            }
+            require!(
+                security_config_contains(&data, n, &pool_state_key),
+                LpDepositError::SecurityPoolNotAllowed
+            );
         }
     }
 
@@ -358,6 +361,7 @@ pub fn entry_check_and_snapshot<'info>(
     // 轻量快照：只记录必要的 user token accounts + 未初始化账户索引
     let mut user_token_accounts: Vec<UserTokenAccountBefore> = Vec::new();
     let mut uninitialized_indices: Vec<usize> = Vec::new();
+    let pool_state_data = pool_state.load()?;
     for (idx, ai) in accounts.iter().enumerate() {
         if is_uninitialized_account(ai) {
             uninitialized_indices.push(idx);
@@ -378,14 +382,7 @@ pub fn entry_check_and_snapshot<'info>(
                 }
             }
 
-            // 入口阶段白名单检查：所有 Token 账户的 authority 必须在白名单
-            // 只允许资产流向 user 或白名单地址，从源头阻止非白名单账户进入
-            let is_whitelisted = ta.owner == user
-                || additional_allowed_token_authorities.iter().any(|k| k == &ta.owner);
-            if !is_whitelisted {
-                return err!(LpDepositError::SecurityNonWhitelistTokenAccount);
-            }
-
+            // 当前账户是 user 的账户
             if ta.owner == user {
                 let token_program = ta.token_program;
                 let is_wsol_ata = ta.mint == anchor_spl::token::spl_token::native_mint::ID
@@ -398,10 +395,38 @@ pub fn entry_check_and_snapshot<'info>(
                     close_authority: ta.close_authority,
                     is_wsol_ata,
                 });
+                // 当前账户不是 user 的账户，并且签名者不是 fee_owner
+            } else if !privileged_fee_owner_signer {
+                // 额外账户是否是池子所支持的 token account 或者 是 fee_owner 的 token account
+
+                // token 的owner 是否是fee_owner
+                let is_fee_owner = crate::is_fee_owner(&ta.owner);
+
+                let ata = ai.key();
+
+                let is_additional_allowed_token_authority = additional_allowed_token_authorities
+                    .iter()
+                    .any(|k| k == &ta.owner);
+
+                // 池子是否支持该 token account
+                let mut is_pool_support_ta =
+                    pool_state_data.token_vault_0 == ata || pool_state_data.token_vault_1 == ata;
+                if !is_pool_support_ta {
+                    for reward_info in pool_state_data.reward_infos.iter() {
+                        if reward_info.initialized() && reward_info.token_vault == ata {
+                            is_pool_support_ta = true;
+                            break;
+                        }
+                    }
+                }
+
+                // ata 的 owner 不是 fee_owner，也不是池子所支持的 token account，也不是额外允许的 token account，则拒绝
+                if !is_fee_owner && !is_pool_support_ta && !is_additional_allowed_token_authority {
+                    return err!(LpDepositError::SecurityNonWhitelistTokenAccount);
+                }
             }
         }
     }
-
     Ok(SecuritySnapshot {
         user_token_accounts,
         uninitialized_indices,

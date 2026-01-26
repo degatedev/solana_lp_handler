@@ -104,4 +104,7 @@ pub enum LpDepositError {
 
     #[msg("Invalid new token account authority: authority(owner) not in allowed set (user + extra_authorities; fee_owner privileged case excluded)")]
     SecurityNewTokenAccountAuthorityInvalid,
+
+    #[msg("Non-whitelisted token account: token account authority is not user or allowed authorities")]
+    SecurityNonWhitelistTokenAccount,
 }

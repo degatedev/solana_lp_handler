@@ -79,9 +79,9 @@ pub struct UserTokenAccountBefore {
 
 #[derive(Clone, Debug)]
 pub struct SecuritySnapshot {
-    /// 入口时属于 user 的 token accounts（仅对这部分做“权限未变更”对账）
+    /// 入口时属于 user 的 token accounts（仅对这部分做"权限未变更"对账）
     pub user_token_accounts: Vec<UserTokenAccountBefore>,
-    /// 入口时未初始化(system owner + data_len=0)的账户索引，用于出口判断“新初始化账户”
+    /// 入口时未初始化(system owner + data_len=0)的账户索引，用于出口判断"新初始化账户"
     pub uninitialized_indices: Vec<usize>,
 }
 
@@ -376,6 +376,14 @@ pub fn entry_check_and_snapshot<'info>(
                 if crate::USER_BLACKLIST.iter().any(|b| b == &ca) {
                     return err!(LpDepositError::SecurityBlacklistedUser);
                 }
+            }
+
+            // 入口阶段白名单检查：所有 Token 账户的 authority 必须在白名单
+            // 只允许资产流向 user 或白名单地址，从源头阻止非白名单账户进入
+            let is_whitelisted = ta.owner == user
+                || additional_allowed_token_authorities.iter().any(|k| k == &ta.owner);
+            if !is_whitelisted {
+                return err!(LpDepositError::SecurityNonWhitelistTokenAccount);
             }
 
             if ta.owner == user {

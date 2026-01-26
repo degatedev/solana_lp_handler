@@ -67,10 +67,13 @@ pub mod lp_handler {
     ) -> Result<()> {
         let user = ctx.accounts.user.key();
         let position_nft_owner = ctx.accounts.position_nft_owner.key();
+        // Raydium vault 的 authority（PDA），加入白名单以允许向 vault 转账
+        let vault0_authority = ctx.accounts.token_vault_0.owner;
+        let vault1_authority = ctx.accounts.token_vault_1.owner;
         secure_entrypoint!(
             ctx,
             user = user,
-            extra_authorities = &[position_nft_owner],
+            extra_authorities = &[position_nft_owner, vault0_authority, vault1_authority],
             pool_states = &[ctx.accounts.pool_state.key()],
             body = instructions::swap_and_deposit(
                 ctx,
@@ -104,10 +107,13 @@ pub mod lp_handler {
     ) -> Result<()> {
         let user = ctx.accounts.user.key();
         let fee_owner = ctx.accounts.fee_owner.key();
+        // Raydium vault 的 authority（PDA），加入白名单以允许向 vault 转账
+        let vault0_authority = ctx.accounts.token_vault_0.owner;
+        let vault1_authority = ctx.accounts.token_vault_1.owner;
         secure_entrypoint!(
             ctx,
             user = user,
-            extra_authorities = &[fee_owner],
+            extra_authorities = &[fee_owner, vault0_authority, vault1_authority],
             pool_states = &[ctx.accounts.pool_state.key()],
             body = instructions::decrease_liquidity(
                 ctx,
@@ -135,10 +141,13 @@ pub mod lp_handler {
         swap_input_is_token0: bool,
     ) -> Result<()> {
         let user = ctx.accounts.user.key();
+        // Raydium vault 的 authority（PDA），加入白名单以允许向 vault 转账
+        let vault0_authority = ctx.accounts.token_vault_0.owner;
+        let vault1_authority = ctx.accounts.token_vault_1.owner;
         secure_entrypoint!(
             ctx,
             user = user,
-            extra_authorities = &[],
+            extra_authorities = &[vault0_authority, vault1_authority],
             pool_states = &[ctx.accounts.pool_state.key()],
             body = instructions::increase_liquidity(
                 ctx,

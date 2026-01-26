@@ -348,16 +348,6 @@ pub fn entry_check_and_snapshot<'info>(
         }
     }
 
-    // 黑名单：不允许 user 或新增允许 authority 命中黑名单（防止绕过）
-    if crate::USER_BLACKLIST.iter().any(|k| k == &user) {
-        return err!(LpDepositError::SecurityBlacklistedUser);
-    }
-    for k in additional_allowed_token_authorities.iter() {
-        if crate::USER_BLACKLIST.iter().any(|b| b == k) {
-            return err!(LpDepositError::SecurityBlacklistedUser);
-        }
-    }
-
     // 轻量快照：只记录必要的 user token accounts + 未初始化账户索引
     let mut user_token_accounts: Vec<UserTokenAccountBefore> = Vec::new();
     let mut uninitialized_indices: Vec<usize> = Vec::new();
@@ -367,22 +357,6 @@ pub fn entry_check_and_snapshot<'info>(
             uninitialized_indices.push(idx);
         }
         if let Some(ta) = parse_token_account(ai) {
-            // 入口阶段黑名单预检：authority/delegate/close_authority 不得命中黑名单
-            if crate::USER_BLACKLIST.iter().any(|b| b == &ta.owner) {
-                return err!(LpDepositError::SecurityBlacklistedUser);
-            }
-            if let Some(d) = ta.delegate {
-                if crate::USER_BLACKLIST.iter().any(|b| b == &d) {
-                    return err!(LpDepositError::SecurityBlacklistedUser);
-                }
-            }
-            if let Some(ca) = ta.close_authority {
-                if crate::USER_BLACKLIST.iter().any(|b| b == &ca) {
-                    return err!(LpDepositError::SecurityBlacklistedUser);
-                }
-            }
-
-            // 当前账户是 user 的账户
             if ta.owner == user {
                 let token_program = ta.token_program;
                 let is_wsol_ata = ta.mint == anchor_spl::token::spl_token::native_mint::ID
@@ -545,21 +519,6 @@ pub fn exit_check<'info>(
                 ),
                 LpDepositError::SecurityNewTokenAccountAuthorityInvalid
             );
-            // 黑名单检查
-            require!(
-                !crate::USER_BLACKLIST.iter().any(|b| b == &ta.owner),
-                LpDepositError::SecurityBlacklistedUser
-            );
-            if let Some(d) = ta.delegate {
-                if crate::USER_BLACKLIST.iter().any(|b| b == &d) {
-                    return err!(LpDepositError::SecurityBlacklistedUser);
-                }
-            }
-            if let Some(ca) = ta.close_authority {
-                if crate::USER_BLACKLIST.iter().any(|b| b == &ca) {
-                    return err!(LpDepositError::SecurityBlacklistedUser);
-                }
-            }
         }
     }
 

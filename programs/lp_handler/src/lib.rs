@@ -67,9 +67,6 @@ pub mod lp_handler {
     ) -> Result<()> {
         let user = ctx.accounts.user.key();
         let position_nft_owner = ctx.accounts.position_nft_owner.key();
-        // Raydium vault 的 authority（PDA），加入白名单以允许向 vault 转账
-        let vault0_authority = ctx.accounts.token_vault_0.owner;
-        let vault1_authority = ctx.accounts.token_vault_1.owner;
         secure_entrypoint!(
             ctx,
             user = user,
@@ -107,9 +104,6 @@ pub mod lp_handler {
     ) -> Result<()> {
         let user = ctx.accounts.user.key();
         let fee_owner = ctx.accounts.fee_owner.key();
-        // Raydium vault 的 authority（PDA），加入白名单以允许向 vault 转账
-        let vault0_authority = ctx.accounts.token_vault_0.owner;
-        let vault1_authority = ctx.accounts.token_vault_1.owner;
         secure_entrypoint!(
             ctx,
             user = user,
@@ -141,9 +135,6 @@ pub mod lp_handler {
         swap_input_is_token0: bool,
     ) -> Result<()> {
         let user = ctx.accounts.user.key();
-        // Raydium vault 的 authority（PDA），加入白名单以允许向 vault 转账
-        let vault0_authority = ctx.accounts.token_vault_0.owner;
-        let vault1_authority = ctx.accounts.token_vault_1.owner;
         secure_entrypoint!(
             ctx,
             user = user,

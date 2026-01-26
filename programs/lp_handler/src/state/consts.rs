@@ -55,6 +55,3 @@ pub const ALLOWED_ACCOUNT_OWNERS: &[Pubkey] = &[
     anchor_spl::associated_token::ID,
     raydium_amm_v3::ID,
 ];
-
-/// 黑名单用户（空 = 不限制）
-pub const USER_BLACKLIST: &[Pubkey] = &[];

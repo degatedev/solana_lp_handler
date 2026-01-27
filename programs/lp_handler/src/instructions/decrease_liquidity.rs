@@ -7,9 +7,7 @@ use anchor_spl::token_interface::{Mint, TokenAccount};
 use raydium_amm_v3::program::AmmV3;
 
 use super::zap_common;
-use crate::{
-    is_fee_owner, utils, LpDepositError, LpHandlerDecreaseLiquidityEvent, SECURITY_CONFIG_SEED,
-};
+use crate::{utils, LpDepositError, LpHandlerDecreaseLiquidityEvent, SECURITY_CONFIG_SEED};
 use raydium_amm_v3::cpi as clmm_cpi;
 use raydium_amm_v3::cpi::accounts as clmm_accounts;
 use raydium_amm_v3::states::{
@@ -57,10 +55,17 @@ pub struct DecreaseLiquidity<'info> {
     #[account(mut)]
     pub fee_owner: SystemAccount<'info>,
 
-    #[account(mut)]
+    #[account(mut,
+        token::mint = token_vault_0.mint,
+        token::authority = fee_owner,
+    )]
     pub fee_token0_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
-    #[account(mut)]
+    #[account(
+        mut,
+        token::mint = token_vault_1.mint,
+        token::authority = fee_owner,
+    )]
     pub fee_token1_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
     /// AMM 配置账户（swap 和 position 都需要通过 pool_state 关联）
@@ -169,11 +174,6 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
     fee_percent: u16,
     convert_to_usdc: bool,
 ) -> Result<()> {
-    // 固定 fee 收款人白名单校验（支持多个固定地址）
-    require!(
-        is_fee_owner(&ctx.accounts.fee_owner.key()),
-        LpDepositError::InvalidFeeOwner
-    );
     // 校验手续费比例，最大 100%（10000 bps）
     require!(fee_percent <= 10_000, LpDepositError::InvalidFeePercent);
     require!(slippage_bps <= 10_000, LpDepositError::InvalidSlippage);
@@ -183,80 +183,12 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
         LpDepositError::InvalidDepositMint
     );
 
-    // 固定 fee 收款账户：必须是 fee_owner 对应 mint 的 ATA（支持 token / token2022）
-    // vault mint 的账户 owner 就是它的 token program（spl-token 或 token-2022）
-    let vault0_token_program = ctx.accounts.vault_0_mint.to_account_info().owner;
-    let vault1_token_program = ctx.accounts.vault_1_mint.to_account_info().owner;
-    let expected_fee_ata_0 = utils::derive_ata_address(
-        &ctx.accounts.fee_owner.key(),
-        &ctx.accounts.vault_0_mint.key(),
-        vault0_token_program,
-        &ctx.accounts.associated_token_program.key(),
-    );
-    let expected_fee_ata_1 = utils::derive_ata_address(
-        &ctx.accounts.fee_owner.key(),
-        &ctx.accounts.vault_1_mint.key(),
-        vault1_token_program,
-        &ctx.accounts.associated_token_program.key(),
-    );
-    require_keys_eq!(
-        ctx.accounts.fee_token0_account.key(),
-        expected_fee_ata_0,
-        LpDepositError::InvalidFeeTokenAccount
-    );
-    require_keys_eq!(
-        ctx.accounts.fee_token1_account.key(),
-        expected_fee_ata_1,
-        LpDepositError::InvalidFeeTokenAccount
-    );
-    require_keys_eq!(
-        ctx.accounts.fee_token0_account.mint,
-        ctx.accounts.vault_0_mint.key(),
-        LpDepositError::InvalidFeeTokenAccount
-    );
-    require_keys_eq!(
-        ctx.accounts.fee_token1_account.mint,
-        ctx.accounts.vault_1_mint.key(),
-        LpDepositError::InvalidFeeTokenAccount
-    );
-    require_keys_eq!(
-        ctx.accounts.fee_token0_account.owner,
-        ctx.accounts.fee_owner.key(),
-        LpDepositError::InvalidFeeTokenAccount
-    );
-    require_keys_eq!(
-        ctx.accounts.fee_token1_account.owner,
-        ctx.accounts.fee_owner.key(),
-        LpDepositError::InvalidFeeTokenAccount
-    );
     // -----------------------------------
     // BEFORE: 读取用户 Token ATA 余额（用于余额差计算）
     // -----------------------------------
     let user_token0_balance_before = ctx.accounts.user_token0_account.amount;
     let user_token1_balance_before = ctx.accounts.user_token1_account.amount;
 
-    let cpi_program = ctx.accounts.raydium_clmm_program.to_account_info();
-    let accounts = &ctx.accounts;
-
-    let cpi_accounts = clmm_accounts::DecreaseLiquidityV2 {
-        nft_owner: accounts.user.to_account_info(),
-        nft_account: accounts.position_nft_account.to_account_info(),
-        personal_position: accounts.personal_position.to_account_info(),
-        pool_state: accounts.pool_state.to_account_info(),
-        protocol_position: accounts.protocol_position.to_account_info(),
-        token_vault_0: accounts.token_vault_0.to_account_info(),
-        token_vault_1: accounts.token_vault_1.to_account_info(),
-        tick_array_lower: accounts.tick_array_lower.to_account_info(),
-        tick_array_upper: accounts.tick_array_upper.to_account_info(),
-        recipient_token_account_0: accounts.user_token0_account.to_account_info(),
-        recipient_token_account_1: accounts.user_token1_account.to_account_info(),
-        token_program: accounts.token_program.to_account_info(),
-        token_program_2022: accounts.token_program_2022.to_account_info(),
-        memo_program: accounts.memo_program.to_account_info(),
-        vault_0_mint: accounts.vault_0_mint.to_account_info(),
-        vault_1_mint: accounts.vault_1_mint.to_account_info(),
-    };
-    // let remaining_account = ctx.remaining_accounts.to_vec();
     let sep = crate::ID; // 你的 lp_handler program id（分隔符）
 
     let sep_index = ctx
@@ -268,8 +200,6 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
     let (swap_remaining, rest) = ctx.remaining_accounts.split_at(sep_index);
     let decrease_remaining = &rest[1..]; // 跳过分隔符本身
 
-    let cpi_ctx = CpiContext::new(cpi_program.clone(), cpi_accounts)
-        .with_remaining_accounts(decrease_remaining.to_vec());
     // -----------------------------
     // 关键：用“余额增量 - principal”得到奖励/手续费，再只对奖励/手续费抽成
     // - claim: liquidity=0 => principal=0 => 全部增量都视为奖励/手续费
@@ -291,7 +221,13 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             liquidity,
         )?
     };
-    clmm_cpi::decrease_liquidity_v2(cpi_ctx, liquidity, mint_amount_0, mint_amount_1)?;
+    cpi_decrease_liquidity_v2(
+        &ctx,
+        liquidity,
+        mint_amount_0,
+        mint_amount_1,
+        decrease_remaining,
+    )?;
 
     ctx.accounts.user_token0_account.reload()?;
     ctx.accounts.user_token1_account.reload()?;
@@ -599,6 +535,40 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
     }
 
     Ok(())
+}
+
+/// 重要：把 Raydium CPI 的 accounts struct 构造移出主 handler，避免 BPF 4KB 栈帧超限。
+#[inline(never)]
+fn cpi_decrease_liquidity_v2<'a, 'b, 'c: 'info, 'info>(
+    ctx: &Context<'a, 'b, 'c, 'info, DecreaseLiquidity<'info>>,
+    liquidity: u128,
+    mint_amount_0: u64,
+    mint_amount_1: u64,
+    decrease_remaining: &[AccountInfo<'info>],
+) -> Result<()> {
+    let accounts = &ctx.accounts;
+    let cpi_program = accounts.raydium_clmm_program.to_account_info();
+    let cpi_accounts = clmm_accounts::DecreaseLiquidityV2 {
+        nft_owner: accounts.user.to_account_info(),
+        nft_account: accounts.position_nft_account.to_account_info(),
+        personal_position: accounts.personal_position.to_account_info(),
+        pool_state: accounts.pool_state.to_account_info(),
+        protocol_position: accounts.protocol_position.to_account_info(),
+        token_vault_0: accounts.token_vault_0.to_account_info(),
+        token_vault_1: accounts.token_vault_1.to_account_info(),
+        tick_array_lower: accounts.tick_array_lower.to_account_info(),
+        tick_array_upper: accounts.tick_array_upper.to_account_info(),
+        recipient_token_account_0: accounts.user_token0_account.to_account_info(),
+        recipient_token_account_1: accounts.user_token1_account.to_account_info(),
+        token_program: accounts.token_program.to_account_info(),
+        token_program_2022: accounts.token_program_2022.to_account_info(),
+        memo_program: accounts.memo_program.to_account_info(),
+        vault_0_mint: accounts.vault_0_mint.to_account_info(),
+        vault_1_mint: accounts.vault_1_mint.to_account_info(),
+    };
+    let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts)
+        .with_remaining_accounts(decrease_remaining.to_vec());
+    clmm_cpi::decrease_liquidity_v2(cpi_ctx, liquidity, mint_amount_0, mint_amount_1)
 }
 
 #[inline(never)]

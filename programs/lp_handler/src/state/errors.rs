@@ -76,9 +76,6 @@ pub enum LpDepositError {
     #[msg("Token-2022 mint has forbidden high-risk extensions (e.g. PermanentDelegate/TransferHook/Confidential/NonTransferable)")]
     SecurityToken2022ForbiddenExtension,
 
-    #[msg("Blacklisted address detected in user/authority/delegate/close_authority")]
-    SecurityBlacklistedUser,
-
     #[msg("Account set changed: an account present at entry is missing at exit (account set must be closed)")]
     SecurityAccountSetChanged,
 

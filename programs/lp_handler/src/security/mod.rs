@@ -255,11 +255,15 @@ pub fn entry_check_and_snapshot<'info>(
     remaining_accounts: &[AccountInfo<'info>],
     pool_state: &AccountLoader<'info, PoolState>,
     user: Pubkey,
+    fee_owner: Pubkey,
     additional_allowed_token_authorities: &[Pubkey],
     _policy: &SecurityPolicy,
 ) -> Result<SecuritySnapshot> {
     let pool_state_key = pool_state.key();
-
+    require!(
+        crate::is_fee_owner(&fee_owner),
+        LpDepositError::InvalidFeeOwner
+    );
     // 签名者是否是fee_owner
     let privileged_fee_owner_signer = crate::is_fee_owner(&user);
     // remaining_accounts 分隔符（crate::ID）约束：若出现，则必须唯一、只读

@@ -30,6 +30,7 @@ import {
   deposit_amount,
   deposit_token_mint,
   endPrice,
+  fee_address,
   getPoolInfo,
   getPoolKeys,
   getRaydium,
@@ -72,9 +73,11 @@ describe('lp_deposit', () => {
 
     const protocolPosition = getPdaProtocolPositionAddress(poolProgramId, pool_address, tickLower, tickUpper).publicKey;
     const { tickArrayLower, tickArrayUpper } = getTickArray(tickLower, tickUpper, poolKeys, poolProgramId);
-    const [userToken0Account, userToken1Account] = await Promise.all([
+    const [userToken0Account, userToken1Account, feeToken0Account, feeToken1Account] = await Promise.all([
       getTokenAta(connection, new PublicKey(poolKeys.mintA.address), user),
-      getTokenAta(connection, new PublicKey(poolKeys.mintB.address), user)
+      getTokenAta(connection, new PublicKey(poolKeys.mintB.address), user),
+      getTokenAta(connection, new PublicKey(poolKeys.mintA.address), fee_address, user),
+      getTokenAta(connection, new PublicKey(poolKeys.mintB.address), fee_address, user)
     ]);
 
     const keypair = Keypair.generate();
@@ -159,6 +162,9 @@ describe('lp_deposit', () => {
       raydiumClmmProgram: CLMM_PROGRAM_ID,
       memoProgram: MEMO_PROGRAM_ID,
       user: user,
+      feeOwner: fee_address,
+      feeToken0Account: feeToken0Account.tokenAccount,
+      feeToken1Account: feeToken1Account.tokenAccount,
       ammConfig: new PublicKey(poolKeys.config.id),
       poolState: pool_address,
       observationState: new PublicKey(poolKeys.observationId),

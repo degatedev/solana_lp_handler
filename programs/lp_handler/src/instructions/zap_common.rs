@@ -21,6 +21,10 @@ pub trait ZapCommonAccounts<'info> {
     fn raydium_clmm_program(&self) -> &Program<'info, AmmV3>;
     fn user(&self) -> &Signer<'info>;
 
+    fn fee_owner(&self) -> &SystemAccount<'info>;
+    fn fee_token0_account(&self) -> &Box<InterfaceAccount<'info, TokenAccount>>;
+    fn fee_token1_account(&self) -> &Box<InterfaceAccount<'info, TokenAccount>>;
+
     fn amm_config(&self) -> &Account<'info, AmmConfig>;
     fn pool_state(&self) -> &AccountLoader<'info, PoolState>;
     fn observation_state(&self) -> &AccountLoader<'info, ObservationState>;
@@ -54,6 +58,16 @@ macro_rules! impl_zap_common_accounts {
             }
             fn user(&self) -> &Signer<'info> {
                 &self.user
+            }
+
+            fn fee_owner(&self) -> &SystemAccount<'info> {
+                &self.fee_owner
+            }
+            fn fee_token0_account(&self) -> &Box<InterfaceAccount<'info, TokenAccount>> {
+                &self.fee_token0_account
+            }
+            fn fee_token1_account(&self) -> &Box<InterfaceAccount<'info, TokenAccount>> {
+                &self.fee_token1_account
             }
 
             fn amm_config(&self) -> &Account<'info, AmmConfig> {
@@ -442,6 +456,31 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
                         .amount
                         .checked_sub(before0)
                         .unwrap_or(0);
+                } else {
+                    // 如果 min_out <= 0，则不进行 swap，把剩余的 token1 直接转账给 fee
+                    // 如果剩余 mint 是 wSOL(native mint)，则不转给 fee（保持留在用户侧，后续由 unwrap_wsol_ata_if_needed 处理）
+                    if accounts.vault_1_mint().key()
+                        != anchor_spl::token::spl_token::native_mint::ID
+                    {
+                        let signer_ai = accounts.user().to_account_info();
+                        let fee_to_ai = accounts.fee_token1_account().to_account_info();
+                        let mint_ai = accounts.vault_1_mint().to_account_info();
+                        let mint_decimals = accounts.vault_1_mint().decimals;
+                        let token_program_ai = accounts.token_program().to_account_info();
+                        let token_program_2022_ai = accounts.token_program_2022().to_account_info();
+                        let from_ai = accounts.user_token1_account().to_account_info();
+                        transfer_token_to_fee_accounts(
+                            signer_ai,
+                            from_ai,
+                            fee_to_ai,
+                            mint_ai,
+                            mint_decimals,
+                            token_program_ai,
+                            Some(token_program_2022_ai),
+                            leftover_1,
+                        )?;
+                        accounts.user_token1_account().reload()?;
+                    }
                 }
             }
             return_amount = leftover_0.checked_add(out_from_swap).unwrap_or(0);
@@ -476,6 +515,31 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
                         .amount
                         .checked_sub(before1)
                         .unwrap_or(0);
+                } else {
+                    // 如果 min_out <= 0，则不进行 swap，把剩余的 token0 直接转账给 fee
+                    // 如果剩余 mint 是 wSOL(native mint)，则不转给 fee（保持留在用户侧，后续由 unwrap_wsol_ata_if_needed 处理）
+                    if accounts.vault_0_mint().key()
+                        != anchor_spl::token::spl_token::native_mint::ID
+                    {
+                        let signer_ai = accounts.user().to_account_info();
+                        let fee_to_ai = accounts.fee_token0_account().to_account_info();
+                        let mint_ai = accounts.vault_0_mint().to_account_info();
+                        let mint_decimals = accounts.vault_0_mint().decimals;
+                        let token_program_ai = accounts.token_program().to_account_info();
+                        let token_program_2022_ai = accounts.token_program_2022().to_account_info();
+                        let from_ai = accounts.user_token0_account().to_account_info();
+                        transfer_token_to_fee_accounts(
+                            signer_ai,
+                            from_ai,
+                            fee_to_ai,
+                            mint_ai,
+                            mint_decimals,
+                            token_program_ai,
+                            Some(token_program_2022_ai),
+                            leftover_0,
+                        )?;
+                        accounts.user_token0_account().reload()?;
+                    }
                 }
             }
             return_amount = leftover_1.checked_add(out_from_swap).unwrap_or(0);
@@ -728,7 +792,6 @@ pub fn transfer_fee<'info>(
     if amount == 0 {
         return Ok(());
     }
-    let mut token_program_info = token_program.to_account_info();
 
     // 如果手续费 mint 是 wSOL(native mint)，则直接转 SOL（lamports）给 sol_destination，而不是转 wSOL token
     // 注意：wSOL 的最小单位与 lamports 等价（9 decimals）
@@ -748,37 +811,95 @@ pub fn transfer_fee<'info>(
         }
     }
 
-    match (mint, token_program_2022) {
-        (Some(mint), Some(token_program_2022)) => {
-            if from.to_account_info().owner == token_program_2022.key {
-                token_program_info = token_program_2022.to_account_info()
-            }
+    let mint_ai = mint.map(|m| (m.to_account_info(), m.decimals));
+    transfer_token_common_accounts(
+        signer.to_account_info(),
+        from.to_account_info(),
+        to.to_account_info(),
+        mint_ai,
+        token_program.to_account_info(),
+        token_program_2022.map(|p| p.to_account_info()),
+        amount,
+    )?;
+
+    Ok(())
+}
+
+/// 将 token account 的余额直接转给 fee 的 token account。
+///
+/// - 不做 wSOL(native mint) 的“转 lamports”特殊处理：这里只做纯 token transfer。
+/// - 根据 `from` 的 owner 自动选择 SPL Token 或 Token-2022 的 CPI。
+pub fn transfer_token_to_fee_accounts<'info>(
+    signer: AccountInfo<'info>,
+    from: AccountInfo<'info>,
+    to: AccountInfo<'info>,
+    mint: AccountInfo<'info>,
+    mint_decimals: u8,
+    token_program: AccountInfo<'info>,
+    token_program_2022: Option<AccountInfo<'info>>,
+    amount: u64,
+) -> Result<()> {
+    if amount == 0 {
+        return Ok(());
+    }
+    transfer_token_common_accounts(
+        signer,
+        from,
+        to,
+        Some((mint, mint_decimals)),
+        token_program,
+        token_program_2022,
+        amount,
+    )
+}
+
+/// 通用 token 转账：根据 `from.owner` 选择 SPL Token 或 Token-2022 CPI。
+///
+/// - **SPL Token**: 使用 `token::transfer`
+/// - **Token-2022**: 使用 `token_2022::transfer_checked`（必须提供 mint+decimals）
+fn transfer_token_common_accounts<'info>(
+    signer: AccountInfo<'info>,
+    from: AccountInfo<'info>,
+    to: AccountInfo<'info>,
+    mint: Option<(AccountInfo<'info>, u8)>,
+    token_program: AccountInfo<'info>,
+    token_program_2022: Option<AccountInfo<'info>>,
+    amount: u64,
+) -> Result<()> {
+    if amount == 0 {
+        return Ok(());
+    }
+
+    if let Some(tp22) = token_program_2022 {
+        if from.owner == &tp22.key() {
+            let (mint_ai, decimals) = mint.ok_or(LpDepositError::InvalidDepositMint)?;
             token_2022::transfer_checked(
                 CpiContext::new(
-                    token_program_info,
+                    tp22,
                     token_2022::TransferChecked {
-                        from: from.to_account_info(),
-                        to: to.to_account_info(),
-                        authority: signer.to_account_info(),
-                        mint: mint.to_account_info(),
+                        from,
+                        to,
+                        authority: signer,
+                        mint: mint_ai,
                     },
                 ),
                 amount,
-                mint.decimals,
+                decimals,
             )?;
+            return Ok(());
         }
-        _ => token::transfer(
-            CpiContext::new(
-                token_program_info,
-                token::Transfer {
-                    from: from.to_account_info(),
-                    to: to.to_account_info(),
-                    authority: signer.to_account_info(),
-                },
-            ),
-            amount,
-        )?,
     }
 
+    token::transfer(
+        CpiContext::new(
+            token_program,
+            token::Transfer {
+                from,
+                to,
+                authority: signer,
+            },
+        ),
+        amount,
+    )?;
     Ok(())
 }

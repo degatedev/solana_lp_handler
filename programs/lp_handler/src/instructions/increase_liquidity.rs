@@ -84,6 +84,22 @@ pub struct IncreaseLiquidity<'info> {
     )]
     pub user_token1_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
+    #[account(mut)]
+    pub fee_owner: SystemAccount<'info>,
+
+    #[account(mut,
+        token::mint = token_vault_0.mint,
+        token::authority = fee_owner,
+    )]
+    pub fee_token0_account: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    #[account(
+        mut,
+        token::mint = token_vault_1.mint,
+        token::authority = fee_owner,
+    )]
+    pub fee_token1_account: Box<InterfaceAccount<'info, TokenAccount>>,
+
     pub memo_program: Program<'info, Memo>,
 
     /// 池子 token_0 的金库 TokenAccount 地址

@@ -12,7 +12,7 @@ use state::*;
 
 // ProgramId 需要与部署的 program keypair 对应的地址一致。
 // 本分支统一使用生产环境（mainnet）的 ProgramId。
-declare_id!("DvUvffrVk4EoAq8gU7SE3Zgv1UJ1kn6M4NWuK3iseAtR");
+declare_id!("8DNUUhd5ihSqSWqW82uS3WLJadmqTYGaCUJoubLKWNzS");
 
 #[program]
 #[allow(deprecated)]
@@ -28,6 +28,7 @@ pub mod lp_handler {
         (
             $ctx:expr,
             user = $user:expr,
+            fee_owner = $fee_owner:expr,
             extra_authorities = $extra:expr,
             pool_state = $pool:expr,
             body = $body:expr
@@ -42,6 +43,7 @@ pub mod lp_handler {
                 $ctx.remaining_accounts,
                 $pool,
                 $user,
+                $fee_owner,
                 $extra,
                 &policy,
             )?;
@@ -66,10 +68,12 @@ pub mod lp_handler {
         swap_input_is_token0: bool,
     ) -> Result<()> {
         let user = ctx.accounts.user.key();
+        let fee_owner = ctx.accounts.fee_owner.key();
         let position_nft_owner = ctx.accounts.position_nft_owner.key();
         secure_entrypoint!(
             ctx,
             user = user,
+            fee_owner = fee_owner,
             extra_authorities = &[position_nft_owner],
             pool_state = &ctx.accounts.pool_state,
             body = instructions::swap_and_deposit(
@@ -107,7 +111,8 @@ pub mod lp_handler {
         secure_entrypoint!(
             ctx,
             user = user,
-            extra_authorities = &[fee_owner],
+            fee_owner = fee_owner,
+            extra_authorities = &[],
             pool_state = &ctx.accounts.pool_state,
             body = instructions::decrease_liquidity(
                 ctx,
@@ -135,9 +140,11 @@ pub mod lp_handler {
         swap_input_is_token0: bool,
     ) -> Result<()> {
         let user = ctx.accounts.user.key();
+        let fee_owner = ctx.accounts.fee_owner.key();
         secure_entrypoint!(
             ctx,
             user = user,
+            fee_owner = fee_owner,
             extra_authorities = &[],
             pool_state = &ctx.accounts.pool_state,
             body = instructions::increase_liquidity(

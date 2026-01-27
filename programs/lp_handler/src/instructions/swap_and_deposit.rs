@@ -62,6 +62,22 @@ pub struct SwapAndDeposit<'info> {
     )]
     pub user_token1_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
+    #[account(mut)]
+    pub fee_owner: SystemAccount<'info>,
+
+    #[account(mut,
+        token::mint = token_vault_0.mint,
+        token::authority = fee_owner,
+    )]
+    pub fee_token0_account: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    #[account(
+        mut,
+        token::mint = token_vault_1.mint,
+        token::authority = fee_owner,
+    )]
+    pub fee_token1_account: Box<InterfaceAccount<'info, TokenAccount>>,
+
     /// CHECK: position NFT 的接收者（owner）。安全层会校验其 authority 关系
     pub position_nft_owner: UncheckedAccount<'info>,
 

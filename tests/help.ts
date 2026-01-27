@@ -111,7 +111,6 @@ export const pools =[
   new PublicKey('6m5aXAve4uh6Kt4ytKyCLWNMjd8PYP5vujwNCtycrUiD'),//AMZNx-USDC
   new PublicKey('4KqQN6u1pFKroFE2jVEhoepAMRKPcuAzWVDCgm9zRBYN'), // NVDAx
   new PublicKey('3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv'), // SOL-USDC
-  new PublicKey('9vFxMAsyfj8Jx5kn17bp5e6PEFaCwMX4yrx2ekHAh4p2'), // USDTc-USDC
   new PublicKey('G39wywquKbHK8F2wZZZFX3fcsyG91VCCbbr6WEVp5axy'), // CRCLx-USDC
   new PublicKey('RyhF4cksVZY7vcqJpoytHcxcGNKRp27PEGhSnEPpbGv'), // MSTRx-USDC
   new PublicKey('7sHMnvE7WqP7vQFWJGEnMT4vZg6Za9K7PpddDoXJCqME'), // SPYx-USDC

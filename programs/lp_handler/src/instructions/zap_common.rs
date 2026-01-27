@@ -11,7 +11,7 @@ use raydium_amm_v3::libraries::{get_sqrt_price_at_tick, liquidity_math};
 use raydium_amm_v3::program::AmmV3;
 use raydium_amm_v3::states::{AmmConfig, ObservationState, PoolState};
 
-use crate::{utils, LpDepositError, LpHandlerIncreaseLiquidityEvent};
+use crate::{log_event_no_heap, utils, LpDepositError, LpHandlerIncreaseLiquidityEvent};
 
 /// 两个指令（`swap_and_deposit` / `increase_liquidity`）共享的账户访问接口。
 ///
@@ -127,8 +127,10 @@ pub struct ZapPlan<'info> {
     pub balance_0_pre_cpi: u64,
     pub balance_1_pre_cpi: u64,
 
-    pub swap_remaining: Vec<AccountInfo<'info>>,
-    pub action_remaining: Vec<AccountInfo<'info>>,
+    /// swap_v2 所需 remaining accounts（来自 ctx.remaining_accounts 的 slice，不在这里分配 Vec）
+    pub swap_remaining: &'info [AccountInfo<'info>],
+    /// open_position/increase_liquidity 所需 remaining accounts（来自 ctx.remaining_accounts 的 slice）
+    pub action_remaining: &'info [AccountInfo<'info>],
 
     pub amount_0_max: u64,
     pub amount_1_max: u64,
@@ -140,7 +142,7 @@ pub struct ZapPlan<'info> {
 
 pub fn prepare_zap_plan_and_swap_if_needed<'info>(
     accounts: &mut dyn ZapCommonAccounts<'info>,
-    remaining_accounts: &[AccountInfo<'info>],
+    remaining_accounts: &'info [AccountInfo<'info>],
     amount_0_in: u64,
     amount_1_in: u64,
     return_mint: Option<Pubkey>,
@@ -259,9 +261,6 @@ pub fn prepare_zap_plan_and_swap_if_needed<'info>(
     let (swap_remaining_slice, rest) = remaining_accounts.split_at(sep_index);
     let action_remaining_slice = &rest[1..]; // 跳过分隔符本身
 
-    let swap_remaining: Vec<AccountInfo<'info>> = swap_remaining_slice.to_vec();
-    let action_remaining: Vec<AccountInfo<'info>> = action_remaining_slice.to_vec();
-
     // 执行主配平 swap（plan 指定，最多一次）
     let mut amount_0_max = amount_0_in;
     let mut amount_1_max = amount_1_in;
@@ -275,7 +274,7 @@ pub fn prepare_zap_plan_and_swap_if_needed<'info>(
             exec_swap_min_out,
             0,
             exec_swap_input_is_token0,
-            swap_remaining.clone(),
+            swap_remaining_slice.to_vec(),
         )?;
 
         accounts.user_token0_account().reload()?;
@@ -372,8 +371,8 @@ pub fn prepare_zap_plan_and_swap_if_needed<'info>(
         balance_1_before,
         balance_0_pre_cpi,
         balance_1_pre_cpi,
-        swap_remaining,
-        action_remaining,
+        swap_remaining: swap_remaining_slice,
+        action_remaining: action_remaining_slice,
         amount_0_max,
         amount_1_max,
         base_flag,
@@ -394,7 +393,7 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
     balance_1_pre_cpi: u64,
     amount_0_max: u64,
     amount_1_max: u64,
-    swap_remaining: Vec<AccountInfo<'info>>,
+    swap_remaining: &'info [AccountInfo<'info>],
     position_nft_mint: Pubkey,
 ) -> Result<u64> {
     accounts.user_token0_account().reload()?;
@@ -448,7 +447,7 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
                         min_out,
                         0,
                         false,
-                        swap_remaining.clone(),
+                        swap_remaining.to_vec(),
                     )?;
                     accounts.user_token0_account().reload()?;
                     out_from_swap = accounts
@@ -507,7 +506,7 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
                         min_out,
                         0,
                         true,
-                        swap_remaining.clone(),
+                        swap_remaining.to_vec(),
                     )?;
                     accounts.user_token1_account().reload()?;
                     out_from_swap = accounts
@@ -546,7 +545,8 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
         }
     }
 
-    emit!(LpHandlerIncreaseLiquidityEvent {
+    // 注意：用无堆分配的 event log，降低 SBF 堆内存峰值，避免 OOM。
+    let ev = LpHandlerIncreaseLiquidityEvent {
         user: accounts.user().key(),
         pool: accounts.pool_state().key(),
         position_nft_mint,
@@ -561,7 +561,8 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
         amount_1_in,
         return_mint,
         return_amount,
-    });
+    };
+    log_event_no_heap(&ev)?;
 
     // 这里必须先把 AccountInfo 拷贝出来，避免同时出现 &self / &mut self 的借用冲突
     let user_ai = accounts.user().to_account_info();

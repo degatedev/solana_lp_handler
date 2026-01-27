@@ -270,7 +270,7 @@ fn open_position_with_token22_nft<'a, 'b, 'c: 'info, 'info>(
     amount_0_max: u64,
     amount_1_max: u64,
     base_flag: Option<bool>,
-    open_position_remaining: Vec<AccountInfo<'info>>,
+    open_position_remaining: &[AccountInfo<'info>],
 ) -> Result<()> {
     let cpi_program = ctx.accounts.raydium_clmm_program.to_account_info();
 
@@ -299,8 +299,8 @@ fn open_position_with_token22_nft<'a, 'b, 'c: 'info, 'info>(
         vault_1_mint: accounts.vault_1_mint.to_account_info(),
     };
 
-    let cpi_ctx =
-        CpiContext::new(cpi_program, cpi_accounts).with_remaining_accounts(open_position_remaining);
+    let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts)
+        .with_remaining_accounts(open_position_remaining.to_vec());
 
     clmm_cpi::open_position_with_token22_nft(
         cpi_ctx,

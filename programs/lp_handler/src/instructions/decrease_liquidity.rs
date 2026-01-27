@@ -7,7 +7,9 @@ use anchor_spl::token_interface::{Mint, TokenAccount};
 use raydium_amm_v3::program::AmmV3;
 
 use super::zap_common;
-use crate::{utils, LpDepositError, LpHandlerDecreaseLiquidityEvent, SECURITY_CONFIG_SEED};
+use crate::{
+    log_event_no_heap, utils, LpDepositError, LpHandlerDecreaseLiquidityEvent, SECURITY_CONFIG_SEED,
+};
 use raydium_amm_v3::cpi as clmm_cpi;
 use raydium_amm_v3::cpi::accounts as clmm_accounts;
 use raydium_amm_v3::states::{
@@ -409,7 +411,7 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             let reward_amount_0 = reward_total_in_target
                 .checked_sub(integrator_fee_target)
                 .ok_or(LpDepositError::MathOverflow)?;
-            emit!(LpHandlerDecreaseLiquidityEvent {
+            let ev = LpHandlerDecreaseLiquidityEvent {
                 user: ctx.accounts.user.key(),
                 pool: ctx.accounts.pool_state.key(),
                 token0_mint: ctx.accounts.vault_0_mint.key(),
@@ -425,7 +427,8 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
                 reward_settled_1: 0,
                 fee_settled_0: integrator_fee_target,
                 fee_settled_1: 0,
-            });
+            };
+            log_event_no_heap(&ev)?;
         } else {
             let principal_amount_1 = principal_expected_1
                 .checked_add(principal_out_in_target_est)
@@ -433,7 +436,7 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             let reward_amount_1 = reward_total_in_target
                 .checked_sub(integrator_fee_target)
                 .ok_or(LpDepositError::MathOverflow)?;
-            emit!(LpHandlerDecreaseLiquidityEvent {
+            let ev = LpHandlerDecreaseLiquidityEvent {
                 user: ctx.accounts.user.key(),
                 pool: ctx.accounts.pool_state.key(),
                 token0_mint: ctx.accounts.vault_0_mint.key(),
@@ -449,7 +452,8 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
                 reward_settled_1: reward_amount_1,
                 fee_settled_0: 0,
                 fee_settled_1: integrator_fee_target,
-            });
+            };
+            log_event_no_heap(&ev)?;
         }
         zap_common::unwrap_wsol_ata_if_needed(
             ctx.accounts.user.to_account_info(),
@@ -515,7 +519,7 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
         let reward_amount_1 = reward_gross_1
             .checked_sub(integrator_fee_1)
             .ok_or(LpDepositError::MathOverflow)?;
-        emit!(LpHandlerDecreaseLiquidityEvent {
+        let ev = LpHandlerDecreaseLiquidityEvent {
             user: ctx.accounts.user.key(),
             pool: ctx.accounts.pool_state.key(),
             token0_mint: ctx.accounts.vault_0_mint.key(),
@@ -531,7 +535,8 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             reward_settled_1: reward_amount_1,
             fee_settled_0: integrator_fee_0,
             fee_settled_1: integrator_fee_1,
-        });
+        };
+        log_event_no_heap(&ev)?;
     }
 
     Ok(())

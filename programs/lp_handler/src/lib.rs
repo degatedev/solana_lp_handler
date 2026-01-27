@@ -12,7 +12,7 @@ use state::*;
 
 // ProgramId 需要与部署的 program keypair 对应的地址一致。
 // 本分支统一使用生产环境（mainnet）的 ProgramId。
-declare_id!("8DNUUhd5ihSqSWqW82uS3WLJadmqTYGaCUJoubLKWNzS");
+declare_id!("G9HLH1sA1PNangEGQuvEx9sBbAqy2JCVR7ihWpxWZPqZ");
 
 #[program]
 #[allow(deprecated)]
@@ -29,14 +29,14 @@ pub mod lp_handler {
             $ctx:expr,
             user = $user:expr,
             fee_owner = $fee_owner:expr,
+            position_nft_mint = $position_nft_mint:expr,
             extra_authorities = $extra:expr,
             pool_state = $pool:expr,
             body = $body:expr
         ) => {{
-            let accounts = sec::collect_accounts_to_check(
-                $ctx.accounts.to_account_infos(),
-                $ctx.remaining_accounts,
-            );
+            // 为降低 SBF 堆内存峰值：不再把 remaining_accounts 合并进同一个 Vec<AccountInfo>。
+            // 安全层入口/出口对账仅针对 ctx.accounts；remaining_accounts 只做专项校验（分隔符等）。
+            let accounts = $ctx.accounts.to_account_infos();
             let policy = sec::resolve_policy(&accounts)?;
             let snapshot = sec::entry_check_and_snapshot(
                 &accounts,
@@ -44,6 +44,7 @@ pub mod lp_handler {
                 $pool,
                 $user,
                 $fee_owner,
+                $position_nft_mint,
                 $extra,
                 &policy,
             )?;
@@ -70,10 +71,12 @@ pub mod lp_handler {
         let user = ctx.accounts.user.key();
         let fee_owner = ctx.accounts.fee_owner.key();
         let position_nft_owner = ctx.accounts.position_nft_owner.key();
+        let position_nft_mint = Some(ctx.accounts.position_nft_mint.key());
         secure_entrypoint!(
             ctx,
             user = user,
             fee_owner = fee_owner,
+            position_nft_mint = position_nft_mint,
             extra_authorities = &[position_nft_owner],
             pool_state = &ctx.accounts.pool_state,
             body = instructions::swap_and_deposit(
@@ -112,6 +115,7 @@ pub mod lp_handler {
             ctx,
             user = user,
             fee_owner = fee_owner,
+            position_nft_mint = None,
             extra_authorities = &[],
             pool_state = &ctx.accounts.pool_state,
             body = instructions::decrease_liquidity(
@@ -141,10 +145,12 @@ pub mod lp_handler {
     ) -> Result<()> {
         let user = ctx.accounts.user.key();
         let fee_owner = ctx.accounts.fee_owner.key();
+        let position_nft_mint = Some(ctx.accounts.position_nft_account.mint);
         secure_entrypoint!(
             ctx,
             user = user,
             fee_owner = fee_owner,
+            position_nft_mint = position_nft_mint,
             extra_authorities = &[],
             pool_state = &ctx.accounts.pool_state,
             body = instructions::increase_liquidity(

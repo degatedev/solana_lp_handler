@@ -1,4 +1,5 @@
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program::log::sol_log_data;
 use anchor_lang::solana_program::program_pack::Pack;
 use anchor_spl::token_2022::spl_token_2022::extension::BaseStateWithExtensions;
 use raydium_amm_v3::states::PoolState;
@@ -55,16 +56,6 @@ pub struct TokenAccountSnapshot {
     pub amount: u64,
     pub delegate: Option<Pubkey>,
     pub close_authority: Option<Pubkey>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Token2022ExtensionType {
-    PermanentDelegate,
-    TransferHook,
-    ConfidentialTransfer,
-    NonTransferable,
-    TransferFee,
-    Unknown,
 }
 
 #[derive(Clone, Debug)]
@@ -143,46 +134,20 @@ fn parse_token_account(ai: &AccountInfo) -> Option<TokenAccountSnapshot> {
     parse_spl_token_account(ai).or_else(|| parse_token2022_account(ai))
 }
 
-fn map_token2022_extension(
-    t: anchor_spl::token_2022::spl_token_2022::extension::ExtensionType,
-) -> Token2022ExtensionType {
-    use anchor_spl::token_2022::spl_token_2022::extension::ExtensionType as E;
-    match t {
-        E::PermanentDelegate => Token2022ExtensionType::PermanentDelegate,
-        E::TransferHook => Token2022ExtensionType::TransferHook,
-        E::ConfidentialTransferMint | E::ConfidentialTransferAccount => {
-            Token2022ExtensionType::ConfidentialTransfer
-        }
-        E::NonTransferable => Token2022ExtensionType::NonTransferable,
-        E::TransferFeeConfig | E::TransferFeeAmount => Token2022ExtensionType::TransferFee,
-        _ => Token2022ExtensionType::Unknown,
-    }
-}
-
-fn is_forbidden_token2022_extension(t: Token2022ExtensionType) -> bool {
-    matches!(
-        t,
-        Token2022ExtensionType::PermanentDelegate
-            | Token2022ExtensionType::TransferHook
-            | Token2022ExtensionType::ConfidentialTransfer
-            | Token2022ExtensionType::NonTransferable
-    )
-}
-
-fn dedup_accounts<'info>(accounts: Vec<AccountInfo<'info>>) -> Vec<AccountInfo<'info>> {
-    // 重要：SBF 堆内存非常小（约 32KB），BTreeSet/BTreeMap 会产生大量堆节点分配，易触发 OOM。
-    // 这里改成“线性去重”：仅用一个 Pubkey Vec 记录 seen，O(n^2) 但 n 通常很小（几十个账户），且更省内存。
-    let mut seen: Vec<Pubkey> = Vec::with_capacity(accounts.len());
-    let mut out: Vec<AccountInfo<'info>> = Vec::with_capacity(accounts.len());
-    for a in accounts {
-        let k = a.key();
-        if !seen.iter().any(|x| x == &k) {
-            seen.push(k);
-            out.push(a);
-        }
-    }
-    out
-}
+// fn dedup_accounts<'info>(accounts: Vec<AccountInfo<'info>>) -> Vec<AccountInfo<'info>> {
+//     // 重要：SBF 堆内存非常小（约 32KB），BTreeSet/BTreeMap 会产生大量堆节点分配，易触发 OOM。
+//     // 这里改成“线性去重”：仅用一个 Pubkey Vec 记录 seen，O(n^2) 但 n 通常很小（几十个账户），且更省内存。
+//     let mut seen: Vec<Pubkey> = Vec::with_capacity(accounts.len());
+//     let mut out: Vec<AccountInfo<'info>> = Vec::with_capacity(accounts.len());
+//     for a in accounts {
+//         let k = a.key();
+//         if !seen.iter().any(|x| x == &k) {
+//             seen.push(k);
+//             out.push(a);
+//         }
+//     }
+//     out
+// }
 
 fn security_config_pools_len(data: &[u8]) -> Result<usize> {
     // Anchor discriminator(8) + authority(32) + Vec len(u32=4) + pools
@@ -230,7 +195,9 @@ pub fn collect_accounts_to_check<'info>(
     // 预留容量避免 extend 时触发二次分配（降低堆内存峰值）
     ctx_accounts.reserve(remaining_accounts.len());
     ctx_accounts.extend_from_slice(remaining_accounts);
-    dedup_accounts(ctx_accounts)
+    // 注意：为降低 SBF 堆内存峰值，这里不再做去重（dedup）。
+    // 可能会重复检查同一账户，但能显著减少 Vec 分配与峰值内存，降低 OOM 风险。
+    ctx_accounts
 }
 
 /// 解析并返回本次指令应使用的安全策略。
@@ -256,6 +223,7 @@ pub fn entry_check_and_snapshot<'info>(
     pool_state: &AccountLoader<'info, PoolState>,
     user: Pubkey,
     fee_owner: Pubkey,
+    position_nft_mint: Option<Pubkey>,
     additional_allowed_token_authorities: &[Pubkey],
     _policy: &SecurityPolicy,
 ) -> Result<SecuritySnapshot> {
@@ -285,18 +253,6 @@ pub fn entry_check_and_snapshot<'info>(
         require!(!sep_ai.is_signer, LpDepositError::SecuritySeparatorInvalid);
     }
 
-    // 可执行 program 白名单（按 key）
-    for ai in accounts.iter() {
-        if ai.executable {
-            require!(
-                crate::ALLOWED_EXECUTABLE_PROGRAMS
-                    .iter()
-                    .any(|k| k == &ai.key()),
-                LpDepositError::SecurityUnauthorizedExecutableProgram
-            );
-        }
-    }
-
     // Pool 白名单：
     // - 必须提供 security_config PDA（账户需在列表中）
     // - 若 PDA 尚未初始化，跳过校验
@@ -312,51 +268,96 @@ pub fn entry_check_and_snapshot<'info>(
         }
     }
 
-    // Token-2022 扩展风险检查（基于本次账户集合能观察到的 mint）
-    // 先收集本次涉及的 Token-2022 mints（仅从 token-2022 token account 推导）
-    let mut involved_token2022_mints: Vec<Pubkey> = Vec::new();
-    for ai in accounts.iter() {
-        if let Some(ta) = parse_token_account(ai) {
-            if ta.token_program == anchor_spl::token_2022::ID
-                && !involved_token2022_mints.iter().any(|m| m == &ta.mint)
-            {
-                involved_token2022_mints.push(ta.mint);
-            }
-        }
-    }
-
-    // Token-2022 风险扩展检查（能读到 mint account 就检查；读不到则跳过，不做 mint 白名单限制）
-    for mint_key in involved_token2022_mints.iter() {
-        for ai in accounts.iter() {
-            if ai.key() != *mint_key {
-                continue;
-            }
-            if ai.owner != &anchor_spl::token_2022::ID {
-                continue;
-            }
-            let data = ai.data.borrow();
-            let Ok(state) = anchor_spl::token_2022::spl_token_2022::extension::StateWithExtensions::<
-                anchor_spl::token_2022::spl_token_2022::state::Mint,
-            >::unpack(&data) else {
-                continue;
-            };
-            // 注意：get_extension_types() 本身会返回一个 Vec，但我们避免二次 collect/映射产生额外 Vec。
-            let ext_types = state.get_extension_types().ok().unwrap_or_default();
-            for raw in ext_types.into_iter() {
-                let ext = map_token2022_extension(raw);
-                require!(
-                    !is_forbidden_token2022_extension(ext),
-                    LpDepositError::SecurityToken2022ForbiddenExtension
-                );
-            }
-        }
-    }
-
     // 轻量快照：只记录必要的 user token accounts + 未初始化账户索引
     let mut user_token_accounts: Vec<UserTokenAccountBefore> = Vec::new();
     let mut uninitialized_indices: Vec<usize> = Vec::new();
     let pool_state_data = pool_state.load()?;
+
+    // 仅放行“池子 token mint(0/1)”带 PermanentDelegate
+    // 直接使用 pool_state 里的 token_mint_0/1
+    let vault_mint_0 = pool_state_data.token_mint_0;
+    let vault_mint_1 = pool_state_data.token_mint_1;
+
     for (idx, ai) in accounts.iter().enumerate() {
+        // 可执行 program 白名单（按 key）
+        if ai.executable {
+            require!(
+                crate::ALLOWED_EXECUTABLE_PROGRAMS
+                    .iter()
+                    .any(|k| k == &ai.key()),
+                LpDepositError::SecurityUnauthorizedExecutableProgram
+            );
+        }
+
+        // Token-2022 mint 扩展风险检查
+        // - 不调用 `get_extension_types()`（它会分配 Vec）
+        // - 仅当该账户能被解包为 Token-2022 Mint 时才检查
+        if ai.owner == &anchor_spl::token_2022::ID {
+            // 跳过 position NFT mint 的检查
+            if let Some(nft_mint) = position_nft_mint {
+                if ai.key() == nft_mint {
+                    continue;
+                }
+            }
+            let mint_key = ai.key();
+            let data = ai.data.borrow();
+            if let Ok(state) =
+                anchor_spl::token_2022::spl_token_2022::extension::StateWithExtensions::<
+                    anchor_spl::token_2022::spl_token_2022::state::Mint,
+                >::unpack(&data)
+            {
+                use anchor_spl::token_2022::spl_token_2022::extension as ext;
+                // 命中任何高风险扩展就拒绝，同时输出 data log 方便定位是哪一个 mint 触发。
+                if state
+                    .get_extension::<ext::permanent_delegate::PermanentDelegate>()
+                    .is_ok()
+                {
+                    // 放行：池子 vault mint 允许 PermanentDelegate（否则无法支持该资产）
+                    if vault_mint_0 != mint_key && vault_mint_1 != mint_key {
+                        sol_log_data(&[
+                            b"forbidden_token2022_mint",
+                            mint_key.as_ref(),
+                            b"PermanentDelegate",
+                        ]);
+                        return err!(LpDepositError::SecurityToken2022ForbiddenExtension);
+                    }
+                }
+                if state
+                    .get_extension::<ext::transfer_hook::TransferHook>()
+                    .is_ok()
+                {
+                    sol_log_data(&[
+                        b"forbidden_token2022_mint",
+                        mint_key.as_ref(),
+                        b"TransferHook",
+                    ]);
+                    return err!(LpDepositError::SecurityToken2022ForbiddenExtension);
+                }
+                if state
+                    .get_extension::<ext::confidential_transfer::ConfidentialTransferMint>()
+                    .is_ok()
+                {
+                    sol_log_data(&[
+                        b"forbidden_token2022_mint",
+                        mint_key.as_ref(),
+                        b"ConfidentialTransferMint",
+                    ]);
+                    return err!(LpDepositError::SecurityToken2022ForbiddenExtension);
+                }
+                if state
+                    .get_extension::<ext::non_transferable::NonTransferable>()
+                    .is_ok()
+                {
+                    sol_log_data(&[
+                        b"forbidden_token2022_mint",
+                        mint_key.as_ref(),
+                        b"NonTransferable",
+                    ]);
+                    return err!(LpDepositError::SecurityToken2022ForbiddenExtension);
+                }
+            }
+        }
+
         if is_uninitialized_account(ai) {
             uninitialized_indices.push(idx);
         }

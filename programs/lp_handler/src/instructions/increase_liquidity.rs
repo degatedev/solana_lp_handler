@@ -237,7 +237,7 @@ fn increase_liquidity_v2<'a, 'b, 'c: 'info, 'info>(
     amount_0_max: u64,
     amount_1_max: u64,
     base_flag: Option<bool>,
-    increase_liquidity_remaining: Vec<AccountInfo<'info>>,
+    increase_liquidity_remaining: &[AccountInfo<'info>],
 ) -> Result<()> {
     let cpi_program = ctx.accounts.raydium_clmm_program.to_account_info();
 
@@ -262,7 +262,7 @@ fn increase_liquidity_v2<'a, 'b, 'c: 'info, 'info>(
     };
 
     let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts)
-        .with_remaining_accounts(increase_liquidity_remaining);
+        .with_remaining_accounts(increase_liquidity_remaining.to_vec());
 
     clmm_cpi::increase_liquidity_v2(cpi_ctx, liquidity, amount_0_max, amount_1_max, base_flag)?;
 

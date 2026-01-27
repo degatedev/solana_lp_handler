@@ -11,7 +11,7 @@ use raydium_amm_v3::libraries::{get_sqrt_price_at_tick, liquidity_math};
 use raydium_amm_v3::program::AmmV3;
 use raydium_amm_v3::states::{AmmConfig, ObservationState, PoolState};
 
-use crate::{log_event_no_heap, utils, LpDepositError, LpHandlerIncreaseLiquidityEvent};
+use crate::{utils, LpDepositError, LpHandlerIncreaseLiquidityEvent};
 
 /// 两个指令（`swap_and_deposit` / `increase_liquidity`）共享的账户访问接口。
 ///
@@ -545,8 +545,7 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
         }
     }
 
-    // 注意：用无堆分配的 event log，降低 SBF 堆内存峰值，避免 OOM。
-    let ev = LpHandlerIncreaseLiquidityEvent {
+    emit!(LpHandlerIncreaseLiquidityEvent {
         user: accounts.user().key(),
         pool: accounts.pool_state().key(),
         position_nft_mint,
@@ -561,8 +560,7 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
         amount_1_in,
         return_mint,
         return_amount,
-    };
-    log_event_no_heap(&ev)?;
+    });
 
     // 这里必须先把 AccountInfo 拷贝出来，避免同时出现 &self / &mut self 的借用冲突
     let user_ai = accounts.user().to_account_info();

@@ -1,5 +1,4 @@
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::log::sol_log_data;
 use anchor_lang::solana_program::program_pack::Pack;
 use anchor_spl::token_2022::spl_token_2022::extension::BaseStateWithExtensions;
 use raydium_amm_v3::states::PoolState;
@@ -314,11 +313,7 @@ pub fn entry_check_and_snapshot<'info>(
                 {
                     // 放行：池子 vault mint 允许 PermanentDelegate（否则无法支持该资产）
                     if vault_mint_0 != mint_key && vault_mint_1 != mint_key {
-                        sol_log_data(&[
-                            b"forbidden_token2022_mint",
-                            mint_key.as_ref(),
-                            b"PermanentDelegate",
-                        ]);
+                        msg!("forbidden_token2022_mint: PermanentDelegate{}", mint_key);
                         return err!(LpDepositError::SecurityToken2022ForbiddenExtension);
                     }
                 }
@@ -326,33 +321,24 @@ pub fn entry_check_and_snapshot<'info>(
                     .get_extension::<ext::transfer_hook::TransferHook>()
                     .is_ok()
                 {
-                    sol_log_data(&[
-                        b"forbidden_token2022_mint",
-                        mint_key.as_ref(),
-                        b"TransferHook",
-                    ]);
+                    msg!("forbidden_token2022_mint: TransferHook {}", mint_key);
                     return err!(LpDepositError::SecurityToken2022ForbiddenExtension);
                 }
                 if state
                     .get_extension::<ext::confidential_transfer::ConfidentialTransferMint>()
                     .is_ok()
                 {
-                    sol_log_data(&[
-                        b"forbidden_token2022_mint",
-                        mint_key.as_ref(),
-                        b"ConfidentialTransferMint",
-                    ]);
+                    msg!(
+                        "forbidden_token2022_mint:ConfidentialTransferMint {}",
+                        mint_key
+                    );
                     return err!(LpDepositError::SecurityToken2022ForbiddenExtension);
                 }
                 if state
                     .get_extension::<ext::non_transferable::NonTransferable>()
                     .is_ok()
                 {
-                    sol_log_data(&[
-                        b"forbidden_token2022_mint",
-                        mint_key.as_ref(),
-                        b"NonTransferable",
-                    ]);
+                    msg!("forbidden_token2022_mint:NonTransferable {}", mint_key);
                     return err!(LpDepositError::SecurityToken2022ForbiddenExtension);
                 }
             }

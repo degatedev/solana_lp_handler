@@ -50,6 +50,9 @@ pub enum LpDepositError {
     #[msg("No claimable rewards or redeemable principal")]
     NoBalanceChange,
 
+    #[msg("Invalid security config: pools must not be empty")]
+    SecurityConfigPoolsEmpty,
+
     // -----------------------------
     // Security layer errors
     // -----------------------------

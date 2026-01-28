@@ -5,8 +5,6 @@ use anchor_lang::prelude::*;
 /// 流动性添加事件
 #[event]
 pub struct LpHandlerIncreaseLiquidityEvent {
-    /// 添加流动性的用户
-    pub user: Pubkey,
     /// Pool 地址
     pub pool: Pubkey,
     /// Position NFT mint 地址
@@ -37,8 +35,6 @@ pub struct LpHandlerIncreaseLiquidityEvent {
 
 #[event]
 pub struct LpHandlerDecreaseLiquidityEvent {
-    /// 减少流动性的用户
-    pub user: Pubkey,
     /// Pool 地址
     pub pool: Pubkey,
 

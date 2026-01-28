@@ -1,31 +1,5 @@
 use anchor_lang::prelude::*;
 
-/// 固定的 integrator fee 收款地址白名单（生产环境）
-pub const FEE_OWNERS: &[Pubkey] = &[
-    pubkey!("J3t7ucPyFEh4QH7ut1nfLe1JKC18NU476tyhxNsQvnqg"), // prod
-    pubkey!("E32ykUTbi4Ag8t4Hic41HtDVwAZca1oGorqvkt3YS7Dy"), // dev
-    pubkey!("5sMFtms83riv1vq7e2nGtDBN9w14Mvj2uojPNe32fvwE"), // teste
-    pubkey!("ECcfQBco4MLM8Dkztn7HSVyZze2MY3qkv621PYXbkvon"), // testd
-    pubkey!("AyVjdDnjmkcsfLKZxwHVVafFDJ8BFhk5oLy3w9PLtfbY"), // testd
-    pubkey!("5supVqBoki4jARg3EFjFgpP84mXs6PgC2nUwae3iTDcE"), // stg
-];
-
-/// 安全配置（security_config PDA）的管理员（写死在程序内）
-///
-/// 说明：当前仅使用单一管理员地址；如需按 devnet/mainnet 切换，可在此处加 `#[cfg(feature = \"devnet\")]` 分支。
-pub mod admin {
-    use super::{pubkey, Pubkey};
-    pub const ID: Pubkey = pubkey!("CB5HJVasNzZ7nWJHJTvuiKm4vF9yb5YFqc9jnnPScKpB");
-}
-
-pub fn is_fee_owner(owner: &Pubkey) -> bool {
-    FEE_OWNERS.iter().any(|k| k == owner)
-}
-
-pub fn is_admin(owner: &Pubkey) -> bool {
-    owner == &admin::ID
-}
-
 // -----------------------------
 // Security layer hardcoded config
 //（不通过 PDA，直接写死在程序里）

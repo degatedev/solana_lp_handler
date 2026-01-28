@@ -158,37 +158,6 @@ describe('lp_deposit', () => {
       });
     }
 
-    const accounts = {
-      raydiumClmmProgram: CLMM_PROGRAM_ID,
-      memoProgram: MEMO_PROGRAM_ID,
-      user: user,
-      feeOwner: fee_address,
-      feeToken0Account: feeToken0Account.tokenAccount,
-      feeToken1Account: feeToken1Account.tokenAccount,
-      ammConfig: new PublicKey(poolKeys.config.id),
-      poolState: pool_address,
-      observationState: new PublicKey(poolKeys.observationId),
-      userToken0Account: userToken0Account.tokenAccount,
-      userToken1Account: userToken1Account.tokenAccount,
-      positionNftOwner: user,
-      positionNftMint,
-      positionNftAccount: positionNftAccount.publicKey,
-      protocolPosition,
-      tickArrayLower,
-      tickArrayUpper,
-      personalPosition: personalPosition.publicKey,
-      rent: SYSVAR_RENT_PUBKEY,
-      systemProgram: SYSTEM_PROGRAM_ID,
-      tokenProgram: TOKEN_PROGRAM_ID,
-      associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-      tokenProgram2022: TOKEN_2022_PROGRAM_ID,
-      tokenVault0: new PublicKey(poolKeys.vault.A),
-      tokenVault1: new PublicKey(poolKeys.vault.B),
-      vault0Mint: new PublicKey(poolKeys.mintA.address),
-      vault1Mint: new PublicKey(poolKeys.mintB.address),
-      securityConfig
-    };
-
     const amount0In = isMintA ? new BN(deposit_amount) : new BN(0);
     const amount1In = !isMintA ? new BN(deposit_amount) : new BN(0);
     const swapInputIsToken0 = res.swapDirection === ZapSwapDirection.AtoB;
@@ -207,7 +176,36 @@ describe('lp_deposit', () => {
         res.swapMinOut,
         swapInputIsToken0
       )
-      .accountsStrict(accounts)
+      .accountsStrict({
+        raydiumClmmProgram: CLMM_PROGRAM_ID,
+        memoProgram: MEMO_PROGRAM_ID,
+        signer: user,
+        feeOwner: fee_address,
+        feeToken0Account: feeToken0Account.tokenAccount,
+        feeToken1Account: feeToken1Account.tokenAccount,
+        ammConfig: new PublicKey(poolKeys.config.id),
+        poolState: pool_address,
+        observationState: new PublicKey(poolKeys.observationId),
+        signerToken0Account: userToken0Account.tokenAccount,
+        signerToken1Account: userToken1Account.tokenAccount,
+        recipient: user,
+        positionNftMint,
+        positionNftAccount: positionNftAccount.publicKey,
+        protocolPosition,
+        tickArrayLower,
+        tickArrayUpper,
+        personalPosition: personalPosition.publicKey,
+        rent: SYSVAR_RENT_PUBKEY,
+        systemProgram: SYSTEM_PROGRAM_ID,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+        tokenProgram2022: TOKEN_2022_PROGRAM_ID,
+        tokenVault0: new PublicKey(poolKeys.vault.A),
+        tokenVault1: new PublicKey(poolKeys.vault.B),
+        vault0Mint: new PublicKey(poolKeys.mintA.address),
+        vault1Mint: new PublicKey(poolKeys.mintB.address),
+        securityConfig
+      })
       .remainingAccounts(remainingAccounts)
       .instruction();
 

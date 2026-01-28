@@ -21,8 +21,7 @@ impl SecurityPolicy {
 }
 
 /// 读取 security_config PDA：
-/// - 若账户未初始化（system owner + data_len=0），返回 None（视为“未启用白名单”，跳过 pool 校验）
-/// - 若已初始化，返回 Some(SecurityConfig)
+/// - 要求该 PDA 必须已初始化（program owner + 可解析数据）
 fn load_security_config<'info>(
     accounts: &[AccountInfo<'info>],
 ) -> Result<Option<AccountInfo<'info>>> {
@@ -32,9 +31,9 @@ fn load_security_config<'info>(
         .find(|a| a.key() == expected)
         .ok_or(LpDepositError::SecurityPoolWhitelistMissing)?;
 
-    // 未初始化：直接跳过白名单校验
+    // 未初始化（或已 close）：直接拒绝（要求必须配置）
     if is_uninitialized_account(ai) {
-        return Ok(None);
+        return err!(LpDepositError::SecurityPoolWhitelistMissing);
     }
 
     require_keys_eq!(
@@ -57,20 +56,24 @@ pub struct TokenAccountSnapshot {
 }
 
 #[derive(Clone, Debug)]
-pub struct UserTokenAccountBefore {
-    /// 在 `accounts` 数组中的位置，避免 exit 阶段再做 key->AccountInfo 的映射/分配
-    pub index: usize,
-    pub token_program: Pubkey,
-    pub mint: Pubkey,
+pub struct SignerTokenAccountBefore<'info> {
+    /// 该 token account 的 AccountInfo（可能来自 ctx.accounts 或 remaining_accounts）。
+    ///
+    /// 说明：exit 阶段需要读取“当前状态”做对账；仅保存 key 不足以在不借用 ctx 的情况下取回 AccountInfo。
+    pub account: AccountInfo<'info>,
     pub delegate: Option<Pubkey>,
     pub close_authority: Option<Pubkey>,
     pub is_wsol_ata: bool,
 }
 
 #[derive(Clone, Debug)]
-pub struct SecuritySnapshot {
-    /// 入口时属于 user 的 token accounts（仅对这部分做"权限未变更"对账）
-    pub user_token_accounts: Vec<UserTokenAccountBefore>,
+pub struct SecuritySnapshot<'info> {
+    /// 入口时属于 signer 的 token accounts（仅对这部分做"权限未变更"对账）
+    ///
+    /// 注意：这里包含两部分：
+    /// - ctx.accounts 中 authority==signer 的 token accounts
+    /// - remaining_accounts 中 authority==signer 的 token accounts
+    pub signer_token_accounts: Vec<SignerTokenAccountBefore<'info>>,
     /// 入口时未初始化(system owner + data_len=0)的账户索引，用于出口判断"新初始化账户"
     pub uninitialized_indices: Vec<usize>,
 }
@@ -132,21 +135,6 @@ fn parse_token_account(ai: &AccountInfo) -> Option<TokenAccountSnapshot> {
     parse_spl_token_account(ai).or_else(|| parse_token2022_account(ai))
 }
 
-// fn dedup_accounts<'info>(accounts: Vec<AccountInfo<'info>>) -> Vec<AccountInfo<'info>> {
-//     // 重要：SBF 堆内存非常小（约 32KB），BTreeSet/BTreeMap 会产生大量堆节点分配，易触发 OOM。
-//     // 这里改成“线性去重”：仅用一个 Pubkey Vec 记录 seen，O(n^2) 但 n 通常很小（几十个账户），且更省内存。
-//     let mut seen: Vec<Pubkey> = Vec::with_capacity(accounts.len());
-//     let mut out: Vec<AccountInfo<'info>> = Vec::with_capacity(accounts.len());
-//     for a in accounts {
-//         let k = a.key();
-//         if !seen.iter().any(|x| x == &k) {
-//             seen.push(k);
-//             out.push(a);
-//         }
-//     }
-//     out
-// }
-
 fn security_config_pools_len(data: &[u8]) -> Result<usize> {
     // Anchor discriminator(8) + authority(32) + Vec len(u32=4) + pools
     const HEADER: usize = 8 + 32 + 4;
@@ -186,11 +174,71 @@ fn security_config_contains(data: &[u8], n: usize, key: &Pubkey) -> bool {
     false
 }
 
+fn security_config_fee_owners_len(data: &[u8], pools_n: usize) -> Result<usize> {
+    // discriminator(8) + authority(32) + pools_len(4) + pools + fee_owners_len(4) + fee_owners
+    let pools_start: usize = 8 + 32 + 4;
+    let pools_end = pools_start
+        .checked_add(
+            pools_n
+                .checked_mul(32)
+                .ok_or(LpDepositError::SecurityPoolWhitelistInvalid)?,
+        )
+        .ok_or(LpDepositError::SecurityPoolWhitelistInvalid)?;
+    let header2 = pools_end
+        .checked_add(4)
+        .ok_or(LpDepositError::SecurityPoolWhitelistInvalid)?;
+    require!(
+        data.len() >= header2,
+        LpDepositError::SecurityPoolWhitelistInvalid
+    );
+
+    let len_bytes: [u8; 4] = data[pools_end..pools_end + 4]
+        .try_into()
+        .map_err(|_| error!(LpDepositError::SecurityPoolWhitelistInvalid))?;
+    let n = u32::from_le_bytes(len_bytes) as usize;
+    require!(
+        n <= crate::MAX_FEE_OWNERS,
+        LpDepositError::SecurityPoolWhitelistInvalid
+    );
+    let need = header2
+        .checked_add(
+            n.checked_mul(32)
+                .ok_or(LpDepositError::SecurityPoolWhitelistInvalid)?,
+        )
+        .ok_or(LpDepositError::SecurityPoolWhitelistInvalid)?;
+    require!(
+        data.len() >= need,
+        LpDepositError::SecurityPoolWhitelistInvalid
+    );
+    Ok(n)
+}
+
+fn security_config_fee_owner_contains(
+    data: &[u8],
+    pools_n: usize,
+    fee_n: usize,
+    key: &Pubkey,
+) -> bool {
+    let pools_start = 8 + 32 + 4;
+    let pools_end = pools_start + pools_n * 32;
+    let fee_start = pools_end + 4;
+    let kb = key.as_ref();
+    for i in 0..fee_n {
+        let off = fee_start + i * 32;
+        if data[off..off + 32] == *kb {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn collect_accounts_to_check<'info>(
     mut ctx_accounts: Vec<AccountInfo<'info>>,
     remaining_accounts: &[AccountInfo<'info>],
 ) -> Vec<AccountInfo<'info>> {
-    // 预留容量避免 extend 时触发二次分配（降低堆内存峰值）
+    // 预留容量避免 extend 时触发二次分配（降低堆内存峰值）。
+    // 说明：当前安全层主流程通常只扫描 `ctx.accounts`，此函数主要用于“确实需要把 remaining 合并成一个 Vec”
+    // 的场景；如果你担心 OOM，优先使用“分两段循环分别扫描 main + remaining”的方式，避免一次性 Vec 峰值。
     ctx_accounts.reserve(remaining_accounts.len());
     ctx_accounts.extend_from_slice(remaining_accounts);
     // 注意：为降低 SBF 堆内存峰值，这里不再做去重（dedup）。
@@ -210,27 +258,23 @@ pub fn resolve_policy<'info>(accounts: &[AccountInfo<'info>]) -> Result<Security
 
 /// 入口检查并对所有可触达账户做快照，用于出口对账。
 ///
-/// - `accounts`: `ctx.accounts` + `ctx.remaining_accounts` 合并去重后的账户集合
-/// - `remaining_accounts`: 原始 `ctx.remaining_accounts`（用于分隔符账户等专项检查）
+/// - `accounts`: 当前实现中为 `ctx.accounts.to_account_infos()`（安全层主扫描/快照对象）
+/// - `remaining_accounts`: 原始 `ctx.remaining_accounts`
+///   - 当前只做分隔符专项校验
+///   - 另外：会把其中 **authority==signer 的 token accounts** 纳入快照，用于出口对账
 /// - `pool_state`: 本次业务涉及的 pool_state（用于 pool 白名单校验）
-/// - `user`: 本次指令签名者（用于黑名单/权限对账）
-/// - `additional_allowed_token_authorities`: 业务允许出现的“新增 token account authority”补充白名单
+/// - `signer`: 本次指令签名者（用于权限对账）
+/// - `recipient`: 本次指令允许的收款方（用于 token authority 白名单逻辑）
 pub fn entry_check_and_snapshot<'info>(
     accounts: &[AccountInfo<'info>],
     remaining_accounts: &[AccountInfo<'info>],
     pool_state: &AccountLoader<'info, PoolState>,
-    user: Pubkey,
-    fee_owner: Pubkey,
-    additional_allowed_token_authorities: &[Pubkey],
+    signer: Pubkey,
+    recipient: Pubkey,
     _policy: &SecurityPolicy,
-) -> Result<SecuritySnapshot> {
+) -> Result<SecuritySnapshot<'info>> {
     let pool_state_key = pool_state.key();
-    require!(
-        crate::is_fee_owner(&fee_owner),
-        LpDepositError::InvalidFeeOwner
-    );
-    // 签名者是否是fee_owner
-    let privileged_fee_owner_signer = crate::is_fee_owner(&user);
+
     // remaining_accounts 分隔符（crate::ID）约束：若出现，则必须唯一、只读
     let sep_cnt = remaining_accounts
         .iter()
@@ -250,23 +294,32 @@ pub fn entry_check_and_snapshot<'info>(
         require!(!sep_ai.is_signer, LpDepositError::SecuritySeparatorInvalid);
     }
 
-    // Pool 白名单：
+    // Pool 白名单（强制启用）：
     // - 必须提供 security_config PDA（账户需在列表中）
-    // - 若 PDA 尚未初始化，跳过校验
-    // - 若已初始化但 pools 为空，视为“未启用白名单”，跳过校验
-    if let Some(cfg_ai) = load_security_config(accounts)? {
+    // - 必须已初始化
+    // - pools 不能为空，且 pool_state 必须在 pools 内
+    let cfg_ai_opt = load_security_config(accounts)?;
+    let mut pools_n: usize = 0;
+    let mut fee_owners_n: usize = 0;
+    let mut cfg_ai_for_fee: Option<AccountInfo<'info>> = None;
+
+    if let Some(cfg_ai) = cfg_ai_opt {
+        // 先 clone，避免后续 data.borrow() 导致无法 move
+        cfg_ai_for_fee = Some(cfg_ai.clone());
         let data = cfg_ai.data.borrow();
-        let n = security_config_pools_len(&data)?;
-        if n != 0 {
-            require!(
-                security_config_contains(&data, n, &pool_state_key),
-                LpDepositError::SecurityPoolNotAllowed
-            );
-        }
+        pools_n = security_config_pools_len(&data)?;
+        fee_owners_n = security_config_fee_owners_len(&data, pools_n)?;
+        require!(pools_n != 0, LpDepositError::SecurityPoolWhitelistInvalid);
+        require!(
+            security_config_contains(&data, pools_n, &pool_state_key),
+            LpDepositError::SecurityPoolNotAllowed
+        );
     }
 
-    // 轻量快照：只记录必要的 user token accounts + 未初始化账户索引
-    let mut user_token_accounts: Vec<UserTokenAccountBefore> = Vec::new();
+    // 轻量快照：
+    // - signer 的 token accounts（用于出口对账 authority/delegate/close_authority）
+    // - 入口时未初始化账户索引（用于出口判断“新初始化账户”）
+    let mut signer_token_accounts: Vec<SignerTokenAccountBefore<'info>> = Vec::new();
     let mut uninitialized_indices: Vec<usize> = Vec::new();
     let pool_state_data = pool_state.load()?;
 
@@ -285,30 +338,31 @@ pub fn entry_check_and_snapshot<'info>(
             uninitialized_indices.push(idx);
         }
         if let Some(ta) = parse_token_account(ai) {
-            if ta.owner == user {
+            if ta.owner == signer {
                 let token_program = ta.token_program;
                 let is_wsol_ata = ta.mint == anchor_spl::token::spl_token::native_mint::ID
-                    && is_user_wsol_ata_address(&user, &token_program, &ai.key());
-                user_token_accounts.push(UserTokenAccountBefore {
-                    index: idx,
-                    token_program,
-                    mint: ta.mint,
+                    && is_user_wsol_ata_address(&signer, &token_program, &ai.key());
+                signer_token_accounts.push(SignerTokenAccountBefore {
+                    account: ai.clone(),
                     delegate: ta.delegate,
                     close_authority: ta.close_authority,
                     is_wsol_ata,
                 });
-                // 当前账户不是 user 的账户，并且签名者不是 fee_owner
-            } else if !privileged_fee_owner_signer {
-                // 额外账户是否是池子所支持的 token account 或者 是 fee_owner 的 token account
+                // 当前账户不是 signer 的账户，并且不是 recipient 的账户
+            } else if ta.owner != recipient {
+                // 非 signer/recipient 的 token account：限制其 authority 或 token account 地址必须在允许范围内。
 
-                // token 的owner 是否是fee_owner
-                let is_fee_owner = crate::is_fee_owner(&ta.owner);
+                // token 的 owner 是否在 fee_owner 白名单（来自 security_config PDA）
+                let is_fee_owner = if fee_owners_n != 0 {
+                    // cfg_ai_for_fee 为 None 只可能发生在“未初始化”场景，此时 fee_owners_n 必为 0
+                    let cfg_ai = cfg_ai_for_fee.as_ref().unwrap();
+                    let data = cfg_ai.data.borrow();
+                    security_config_fee_owner_contains(&data, pools_n, fee_owners_n, &ta.owner)
+                } else {
+                    false
+                };
 
                 let ata = ai.key();
-
-                let is_additional_allowed_token_authority = additional_allowed_token_authorities
-                    .iter()
-                    .any(|k| k == &ta.owner);
 
                 // 池子是否支持该 token account
                 let mut is_pool_support_ta =
@@ -322,15 +376,33 @@ pub fn entry_check_and_snapshot<'info>(
                     }
                 }
 
-                // ata 的 owner 不是 fee_owner，也不是池子所支持的 token account，也不是额外允许的 token account，则拒绝
-                if !is_fee_owner && !is_pool_support_ta && !is_additional_allowed_token_authority {
+                // authority 不是 fee_owner 且 token account 地址不是池子支持的 vault，则拒绝
+                if !is_fee_owner && !is_pool_support_ta {
                     return err!(LpDepositError::SecurityNonWhitelistTokenAccount);
                 }
             }
         }
     }
+
+    // 仅补充扫描 remaining_accounts 中“authority==signer”的 token accounts，用于出口对账覆盖 signer 的 token 账户权限变更。
+    // （不对 remaining_accounts 做全量白名单扫描，以降低内存峰值）
+    for ai in remaining_accounts.iter() {
+        if let Some(ta) = parse_token_account(ai) {
+            if ta.owner == signer {
+                let token_program = ta.token_program;
+                let is_wsol_ata = ta.mint == anchor_spl::token::spl_token::native_mint::ID
+                    && is_user_wsol_ata_address(&signer, &token_program, &ai.key());
+                signer_token_accounts.push(SignerTokenAccountBefore {
+                    account: ai.clone(),
+                    delegate: ta.delegate,
+                    close_authority: ta.close_authority,
+                    is_wsol_ata,
+                });
+            }
+        }
+    }
     Ok(SecuritySnapshot {
-        user_token_accounts,
+        signer_token_accounts,
         uninitialized_indices,
     })
 }
@@ -341,36 +413,28 @@ pub fn entry_check_and_snapshot<'info>(
 /// - `owner == lp_handler` 的账户 lamports 不得异常沉淀（仅允许 rent-exempt）
 /// - 用户 token account 的 authority/delegate/close_authority 不得被篡改（按策略）
 /// - 新初始化账户的 owner(program id) 必须在允许集合
-/// - 新初始化 token account 的 authority 必须在允许集合（**当 user 是 fee_owner 白名单时放宽此项**）
+/// - 新初始化 token account 的 authority 必须在允许集合（当前实现：仅允许 `signer` 或 `recipient`）
 pub fn exit_check<'info>(
     accounts: &[AccountInfo<'info>],
-    user: Pubkey,
-    additional_allowed_token_authorities: &[Pubkey],
+    signer: Pubkey,
+    recipient: Pubkey,
     policy: &SecurityPolicy,
-    before: SecuritySnapshot,
+    before: SecuritySnapshot<'info>,
 ) -> Result<()> {
     let rent = Rent::get()?;
-
-    // 允许的 token authority：user + 额外允许（比如 position_nft_owner）
-    // 注意：避免构造 Vec，降低 SBF 堆内存峰值（改为直接在 slice 上判断）。
+    // 允许的 token authority（用于“新初始化 token account”场景）：
+    // - 若 authority == recipient：允许（业务指定收款方）
+    // - 若 authority == signer：允许（默认收款方为签名者）
     #[inline(always)]
-    fn is_allowed_authority(
-        user: &Pubkey,
-        extra: &[Pubkey],
-        candidate: &Pubkey,
-        privileged_fee_owner_signer: bool,
-    ) -> bool {
-        if privileged_fee_owner_signer {
+    fn is_allowed_authority(user: &Pubkey, candidate: &Pubkey, is_recipient: bool) -> bool {
+        if is_recipient {
             return true;
         }
         if candidate == user {
             return true;
         }
-        extra.iter().any(|k| k == candidate)
+        return false;
     }
-    // 特权模式：当签名者 user 本身是 fee_owner 白名单地址时，允许其指定任意收款 authority
-    // 用途：业务分账/代收（例如指定 position_nft_owner 或指定 decrease_liquidity 收款 token account 的 authority）
-    let privileged_fee_owner_signer = crate::is_fee_owner(&user);
 
     // 1) 约束：lp_handler 自己拥有的账户不应滞留多余 SOL（对本次账户集合内所有 owner==lp_handler 的账户）
     for ai in accounts.iter() {
@@ -383,21 +447,19 @@ pub fn exit_check<'info>(
         }
     }
 
-    // 2) 用户 token 账户权限对账（仅对入口阶段就是 user 的 token accounts）
-    for b in before.user_token_accounts.iter() {
-        let ai = accounts
-            .get(b.index)
-            .ok_or(LpDepositError::SecurityAccountSetChanged)?;
+    // 2) signer token 账户权限对账（入口阶段 authority==signer 的 token accounts）
+    for b in before.signer_token_accounts.iter() {
+        let ai = &b.account;
         let cur_uninit = is_uninitialized_account(ai);
         let Some(cur) = parse_token_account(ai) else {
-            // 例外：允许关闭 user 的 wSOL ATA（unwrap wSOL 场景）
+            // 例外：允许关闭 signer 的 wSOL ATA（unwrap wSOL 场景）
             if b.is_wsol_ata && cur_uninit {
                 continue;
             }
             return err!(LpDepositError::SecurityTokenAccountCorrupted);
         };
         require!(
-            cur.owner == user,
+            cur.owner == signer,
             LpDepositError::SecurityTokenAuthorityChanged
         );
         if policy.forbid_delegate {
@@ -439,12 +501,7 @@ pub fn exit_check<'info>(
         );
         if let Some(ta) = parse_token_account(ai) {
             require!(
-                is_allowed_authority(
-                    &user,
-                    additional_allowed_token_authorities,
-                    &ta.owner,
-                    privileged_fee_owner_signer
-                ),
+                is_allowed_authority(&signer, &ta.owner, &ta.owner == &recipient),
                 LpDepositError::SecurityNewTokenAccountAuthorityInvalid
             );
         }

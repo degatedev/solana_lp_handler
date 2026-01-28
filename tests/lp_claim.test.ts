@@ -146,7 +146,8 @@ describe('lp_claim', () => {
       PoolUtils.isOverflowDefaultTickarrayBitmap(poolInfo.config.tickSpacing, [
         tickArrayLowerStartIndex,
         tickArrayUpperStartIndex
-      ])&&tickArrayBitmapExtension
+      ]) &&
+      tickArrayBitmapExtension
     ) {
       remainingAccounts.push({
         pubkey: tickArrayBitmapExtension,
@@ -182,38 +183,37 @@ describe('lp_claim', () => {
       })
     );
 
-    const accounts = {
-      raydiumClmmProgram: CLMM_PROGRAM_ID,
-      user: user,
-      ammConfig: new PublicKey(poolKeys.config.id),
-      poolState: pool_address,
-      observationState: new PublicKey(poolKeys.observationId),
-      userToken0Account: userToken0Account.tokenAccount,
-      userToken1Account: userToken1Account.tokenAccount,
-      feeOwner: fee_address,
-      positionNftAccount: positionNftAccount.publicKey,
-      protocolPosition,
-      tickArrayLower,
-      tickArrayUpper,
-      personalPosition: personalPosition.publicKey,
-      rent: SYSVAR_RENT_PUBKEY,
-      systemProgram: SYSTEM_PROGRAM_ID,
-      tokenProgram: TOKEN_PROGRAM_ID,
-      associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-      tokenProgram2022: TOKEN_2022_PROGRAM_ID,
-      tokenVault0: new PublicKey(poolKeys.vault.A),
-      tokenVault1: new PublicKey(poolKeys.vault.B),
-      vault0Mint: new PublicKey(poolKeys.mintA.address),
-      vault1Mint: new PublicKey(poolKeys.mintB.address),
-      feeToken0Account: feeToken0Account.tokenAccount,
-      feeToken1Account: feeToken1Account.tokenAccount,
-      memoProgram: MEMO_PROGRAM_ID,
-      securityConfig
-    };
-    console.log('accounts', JSON.stringify(accounts, null, 2));
     const instruction = await program.methods
       .decreaseLiquidity(new BN(0), new BN(0), new BN(0), deposit_token_mint, slippage, fee_percent, true)
-      .accountsStrict(accounts)
+      .accountsStrict({
+        raydiumClmmProgram: CLMM_PROGRAM_ID,
+        signer: user,
+        recipient: user,
+        ammConfig: new PublicKey(poolKeys.config.id),
+        poolState: pool_address,
+        observationState: new PublicKey(poolKeys.observationId),
+        recipientToken0Account: userToken0Account.tokenAccount,
+        recipientToken1Account: userToken1Account.tokenAccount,
+        feeOwner: fee_address,
+        positionNftAccount: positionNftAccount.publicKey,
+        protocolPosition,
+        tickArrayLower,
+        tickArrayUpper,
+        personalPosition: personalPosition.publicKey,
+        rent: SYSVAR_RENT_PUBKEY,
+        systemProgram: SYSTEM_PROGRAM_ID,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+        tokenProgram2022: TOKEN_2022_PROGRAM_ID,
+        tokenVault0: new PublicKey(poolKeys.vault.A),
+        tokenVault1: new PublicKey(poolKeys.vault.B),
+        vault0Mint: new PublicKey(poolKeys.mintA.address),
+        vault1Mint: new PublicKey(poolKeys.mintB.address),
+        feeToken0Account: feeToken0Account.tokenAccount,
+        feeToken1Account: feeToken1Account.tokenAccount,
+        memoProgram: MEMO_PROGRAM_ID,
+        securityConfig
+      })
       .remainingAccounts(remainingAccounts)
       .instruction();
 

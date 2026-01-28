@@ -4,7 +4,7 @@ use raydium_amm_v3::cpi::accounts as clmm_accounts;
 use raydium_amm_v3::program::AmmV3;
 use raydium_amm_v3::states::{AmmConfig, ObservationState, PoolState, TickArrayState};
 
-use crate::{utils, LpDepositError, SECURITY_CONFIG_SEED};
+use crate::SECURITY_CONFIG_SEED;
 
 use anchor_spl::associated_token::AssociatedToken;
 use anchor_spl::memo::Memo;
@@ -34,9 +34,26 @@ pub struct SwapAndDeposit<'info> {
     #[account(address = raydium_amm_v3::ID)]
     pub raydium_clmm_program: Program<'info, AmmV3>,
 
+    /// CHECK: position NFT 的接收者（owner）。安全层会校验其 authority 关系
+    pub recipient: UncheckedAccount<'info>,
+
     /// 支付者 / 签名者
     #[account(mut)]
-    pub user: Signer<'info>,
+    pub signer: Signer<'info>,
+
+    #[account(
+        mut,
+        token::mint = token_vault_0.mint,
+        token::authority = signer,
+    )]
+    pub signer_token0_account: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    #[account(
+        mut,
+        token::mint = token_vault_1.mint,
+        token::authority = signer,
+    )]
+    pub signer_token1_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
     /// AMM 配置账户（swap 和 position 都需要通过 pool_state 关联）
     #[account(address = pool_state.load()?.amm_config)]
@@ -49,18 +66,6 @@ pub struct SwapAndDeposit<'info> {
     /// Observation 状态（swap 需要）
     #[account(mut)]
     pub observation_state: AccountLoader<'info, ObservationState>,
-
-    #[account(
-        mut,
-        token::mint = token_vault_0.mint,
-    )]
-    pub user_token0_account: Box<InterfaceAccount<'info, TokenAccount>>,
-
-    #[account(
-        mut,
-        token::mint = token_vault_1.mint,
-    )]
-    pub user_token1_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
     #[account(mut)]
     pub fee_owner: SystemAccount<'info>,
@@ -77,9 +82,6 @@ pub struct SwapAndDeposit<'info> {
         token::authority = fee_owner,
     )]
     pub fee_token1_account: Box<InterfaceAccount<'info, TokenAccount>>,
-
-    /// CHECK: position NFT 的接收者（owner）。安全层会校验其 authority 关系
-    pub position_nft_owner: UncheckedAccount<'info>,
 
     /// position NFT 的 mint（由调用方提供并签名；CPI 会创建并 mint）
     #[account(mut)]
@@ -189,20 +191,6 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
     swap_min_out: u64,
     swap_input_is_token0: bool,
 ) -> Result<()> {
-    // 校验 position_nft_account 必须是 (position_nft_owner, position_nft_mint, Token2022) 的 ATA 地址
-    // 注意：该 ATA 可能尚未初始化（由下游 CPI 创建），因此只校验地址本身，不校验 owner/program。
-    let expected_position_nft_ata = utils::derive_ata_address(
-        &ctx.accounts.position_nft_owner.key(),
-        &ctx.accounts.position_nft_mint.key(),
-        &ctx.accounts.token_program_2022.key(),
-        &ctx.accounts.associated_token_program.key(),
-    );
-    require_keys_eq!(
-        ctx.accounts.position_nft_account.key(),
-        expected_position_nft_ata,
-        LpDepositError::InvalidPositionNftAccount
-    );
-
     let plan = zap_common::prepare_zap_plan_and_swap_if_needed(
         &mut *ctx.accounts,
         ctx.remaining_accounts,
@@ -277,8 +265,8 @@ fn open_position_with_token22_nft<'a, 'b, 'c: 'info, 'info>(
     // 使用解构简化代码
     let accounts = &ctx.accounts;
     let cpi_accounts = clmm_accounts::OpenPositionWithToken22Nft {
-        payer: accounts.user.to_account_info(),
-        position_nft_owner: accounts.position_nft_owner.to_account_info(),
+        payer: accounts.signer.to_account_info(),
+        position_nft_owner: accounts.recipient.to_account_info(),
         position_nft_mint: accounts.position_nft_mint.to_account_info(),
         position_nft_account: accounts.position_nft_account.to_account_info(),
         pool_state: accounts.pool_state.to_account_info(),
@@ -286,8 +274,8 @@ fn open_position_with_token22_nft<'a, 'b, 'c: 'info, 'info>(
         tick_array_lower: accounts.tick_array_lower.to_account_info(),
         tick_array_upper: accounts.tick_array_upper.to_account_info(),
         personal_position: accounts.personal_position.to_account_info(),
-        token_account_0: accounts.user_token0_account.to_account_info(),
-        token_account_1: accounts.user_token1_account.to_account_info(),
+        token_account_0: accounts.signer_token0_account.to_account_info(),
+        token_account_1: accounts.signer_token1_account.to_account_info(),
         token_vault_0: accounts.token_vault_0.to_account_info(),
         token_vault_1: accounts.token_vault_1.to_account_info(),
         rent: accounts.rent.to_account_info(),

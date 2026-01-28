@@ -31,23 +31,26 @@ pub struct DecreaseLiquidity<'info> {
     #[account(address = raydium_amm_v3::ID)]
     pub raydium_clmm_program: Program<'info, AmmV3>,
 
+    /// CHECK: position NFT 的接收者（owner）。安全层会校验其 authority 关系
+    pub recipient: UncheckedAccount<'info>,
+
     /// 支付者 / 签名者
     #[account(mut)]
-    pub user: Signer<'info>,
+    pub signer: Signer<'info>,
 
-    /// user 的 token0 TokenAccount（通常为 ATA；需前端/调用方确保已创建，或在同笔交易里先创建）
+    /// recipient 的 token0 TokenAccount（通常为 ATA；需前端/调用方确保已创建，或在同笔交易里先创建）
     #[account(
         mut,
         token::mint = token_vault_0.mint,
       )]
-    pub user_token0_account: Box<InterfaceAccount<'info, TokenAccount>>,
+    pub recipient_token0_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
-    /// user 的 token1 TokenAccount（通常为 ATA；需前端/调用方确保已创建，或在同笔交易里先创建）
+    /// recipient 的 token1 TokenAccount（通常为 ATA；需前端/调用方确保已创建，或在同笔交易里先创建）
     #[account(
         mut,
         token::mint = token_vault_1.mint,
       )]
-    pub user_token1_account: Box<InterfaceAccount<'info, TokenAccount>>,
+    pub recipient_token1_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
     /// 固定 integrator fee 收款人（防止用户把 fee 转回自己绕过抽成）
     // 这里不能用 `#[account(address = ...)]` 写死单一地址，因为我们支持多个固定收款人白名单；
@@ -186,8 +189,8 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
     // -----------------------------------
     // BEFORE: 读取用户 Token ATA 余额（用于余额差计算）
     // -----------------------------------
-    let user_token0_balance_before = ctx.accounts.user_token0_account.amount;
-    let user_token1_balance_before = ctx.accounts.user_token1_account.amount;
+    let user_token0_balance_before = ctx.accounts.recipient_token0_account.amount;
+    let user_token1_balance_before = ctx.accounts.recipient_token1_account.amount;
 
     let sep = crate::ID; // 你的 lp_handler program id（分隔符）
 
@@ -229,12 +232,12 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
         decrease_remaining,
     )?;
 
-    ctx.accounts.user_token0_account.reload()?;
-    ctx.accounts.user_token1_account.reload()?;
+    ctx.accounts.recipient_token0_account.reload()?;
+    ctx.accounts.recipient_token1_account.reload()?;
     ctx.accounts.personal_position.reload()?;
 
-    let user_token0_balance_after = ctx.accounts.user_token0_account.amount;
-    let user_token1_balance_after = ctx.accounts.user_token1_account.amount;
+    let user_token0_balance_after = ctx.accounts.recipient_token0_account.amount;
+    let user_token1_balance_after = ctx.accounts.recipient_token1_account.amount;
 
     let user_token0_amount = user_token0_balance_after
         .checked_sub(user_token0_balance_before)
@@ -279,9 +282,9 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
 
         // 记录兑换前目标币种余额，用于计算 swap 的实际输出
         let target_balance_before_swap = if target_is_token0 {
-            ctx.accounts.user_token0_account.amount
+            ctx.accounts.recipient_token0_account.amount
         } else {
-            ctx.accounts.user_token1_account.amount
+            ctx.accounts.recipient_token1_account.amount
         };
 
         // 1) 合并 swap：把 other token 的增量一次性兑换成目标币种（若 total_other_in == 0 则不 swap）
@@ -309,12 +312,12 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             if principal_other_in == 0 && swap_other_amount_threshold == 0 {
                 msg!("skip reward swap (claim-only dust): amount_out_min=0, transfer input to fee");
                 zap_common::transfer_fee(
-                    &ctx.accounts.user,
+                    &ctx.accounts.signer,
                     &ctx.accounts.fee_owner,
                     if input_is_token0 {
-                        &ctx.accounts.user_token0_account
+                        &ctx.accounts.recipient_token0_account
                     } else {
-                        &ctx.accounts.user_token1_account
+                        &ctx.accounts.recipient_token1_account
                     },
                     if input_is_token0 {
                         &ctx.accounts.fee_token0_account
@@ -340,12 +343,12 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
                     input_is_token0,
                     swap_remaining.to_vec(),
                 )?;
-                ctx.accounts.user_token0_account.reload()?;
-                ctx.accounts.user_token1_account.reload()?;
+                ctx.accounts.recipient_token0_account.reload()?;
+                ctx.accounts.recipient_token1_account.reload()?;
                 let target_balance_after_swap = if target_is_token0 {
-                    ctx.accounts.user_token0_account.amount
+                    ctx.accounts.recipient_token0_account.amount
                 } else {
-                    ctx.accounts.user_token1_account.amount
+                    ctx.accounts.recipient_token1_account.amount
                 };
                 total_out_in_target = target_balance_after_swap
                     .checked_sub(target_balance_before_swap)
@@ -378,12 +381,12 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             .ok_or(LpDepositError::MathOverflow)?;
 
         zap_common::transfer_fee(
-            &ctx.accounts.user,
+            &ctx.accounts.signer,
             &ctx.accounts.fee_owner,
             if target_is_token0 {
-                &ctx.accounts.user_token0_account
+                &ctx.accounts.recipient_token0_account
             } else {
-                &ctx.accounts.user_token1_account
+                &ctx.accounts.recipient_token1_account
             },
             if target_is_token0 {
                 &ctx.accounts.fee_token0_account
@@ -410,7 +413,6 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
                 .checked_sub(integrator_fee_target)
                 .ok_or(LpDepositError::MathOverflow)?;
             emit!(LpHandlerDecreaseLiquidityEvent {
-                user: ctx.accounts.user.key(),
                 pool: ctx.accounts.pool_state.key(),
                 token0_mint: ctx.accounts.vault_0_mint.key(),
                 token1_mint: ctx.accounts.vault_1_mint.key(),
@@ -434,7 +436,6 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
                 .checked_sub(integrator_fee_target)
                 .ok_or(LpDepositError::MathOverflow)?;
             emit!(LpHandlerDecreaseLiquidityEvent {
-                user: ctx.accounts.user.key(),
                 pool: ctx.accounts.pool_state.key(),
                 token0_mint: ctx.accounts.vault_0_mint.key(),
                 token1_mint: ctx.accounts.vault_1_mint.key(),
@@ -452,10 +453,10 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             });
         }
         zap_common::unwrap_wsol_ata_if_needed(
-            ctx.accounts.user.to_account_info(),
+            ctx.accounts.signer.to_account_info(),
             [
-                ctx.accounts.user_token0_account.to_account_info(),
-                ctx.accounts.user_token1_account.to_account_info(),
+                ctx.accounts.recipient_token0_account.to_account_info(),
+                ctx.accounts.recipient_token1_account.to_account_info(),
             ],
             ctx.accounts.token_program.to_account_info(),
             Some(ctx.accounts.token_program_2022.to_account_info()),
@@ -475,19 +476,19 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             .ok_or(LpDepositError::MathOverflow)?;
         // unwrap wSOL：关闭 authority 的 wSOL ATA，把 lamports 退回 authority
         zap_common::unwrap_wsol_ata_if_needed(
-            ctx.accounts.user.to_account_info(),
+            ctx.accounts.signer.to_account_info(),
             [
-                ctx.accounts.user_token0_account.to_account_info(),
-                ctx.accounts.user_token1_account.to_account_info(),
+                ctx.accounts.recipient_token0_account.to_account_info(),
+                ctx.accounts.recipient_token1_account.to_account_info(),
             ],
             ctx.accounts.token_program.to_account_info(),
             Some(ctx.accounts.token_program_2022.to_account_info()),
             ctx.accounts.associated_token_program.to_account_info(),
         )?;
         zap_common::transfer_fee(
-            &ctx.accounts.user,
+            &ctx.accounts.signer,
             &ctx.accounts.fee_owner,
-            &ctx.accounts.user_token0_account,
+            &ctx.accounts.recipient_token0_account,
             &ctx.accounts.fee_token0_account,
             Some(&ctx.accounts.vault_0_mint),
             &ctx.accounts.token_program,
@@ -496,9 +497,9 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             integrator_fee_0,
         )?;
         zap_common::transfer_fee(
-            &ctx.accounts.user,
+            &ctx.accounts.signer,
             &ctx.accounts.fee_owner,
-            &ctx.accounts.user_token1_account,
+            &ctx.accounts.recipient_token1_account,
             &ctx.accounts.fee_token1_account,
             Some(&ctx.accounts.vault_1_mint),
             &ctx.accounts.token_program,
@@ -516,7 +517,6 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             .checked_sub(integrator_fee_1)
             .ok_or(LpDepositError::MathOverflow)?;
         emit!(LpHandlerDecreaseLiquidityEvent {
-            user: ctx.accounts.user.key(),
             pool: ctx.accounts.pool_state.key(),
             token0_mint: ctx.accounts.vault_0_mint.key(),
             token1_mint: ctx.accounts.vault_1_mint.key(),
@@ -549,7 +549,7 @@ fn cpi_decrease_liquidity_v2<'a, 'b, 'c: 'info, 'info>(
     let accounts = &ctx.accounts;
     let cpi_program = accounts.raydium_clmm_program.to_account_info();
     let cpi_accounts = clmm_accounts::DecreaseLiquidityV2 {
-        nft_owner: accounts.user.to_account_info(),
+        nft_owner: accounts.signer.to_account_info(),
         nft_account: accounts.position_nft_account.to_account_info(),
         personal_position: accounts.personal_position.to_account_info(),
         pool_state: accounts.pool_state.to_account_info(),
@@ -558,8 +558,8 @@ fn cpi_decrease_liquidity_v2<'a, 'b, 'c: 'info, 'info>(
         token_vault_1: accounts.token_vault_1.to_account_info(),
         tick_array_lower: accounts.tick_array_lower.to_account_info(),
         tick_array_upper: accounts.tick_array_upper.to_account_info(),
-        recipient_token_account_0: accounts.user_token0_account.to_account_info(),
-        recipient_token_account_1: accounts.user_token1_account.to_account_info(),
+        recipient_token_account_0: accounts.recipient_token0_account.to_account_info(),
+        recipient_token_account_1: accounts.recipient_token1_account.to_account_info(),
         token_program: accounts.token_program.to_account_info(),
         token_program_2022: accounts.token_program_2022.to_account_info(),
         memo_program: accounts.memo_program.to_account_info(),
@@ -586,8 +586,8 @@ fn swap_v2<'a, 'b, 'c: 'info, 'info>(
     let (input_token, output_token, input_vault, output_vault, input_mint, output_mint) =
         if is_token0 {
             (
-                accounts.user_token0_account.to_account_info(),
-                accounts.user_token1_account.to_account_info(),
+                accounts.recipient_token0_account.to_account_info(),
+                accounts.recipient_token1_account.to_account_info(),
                 accounts.token_vault_0.to_account_info(),
                 accounts.token_vault_1.to_account_info(),
                 accounts.vault_0_mint.to_account_info(),
@@ -595,8 +595,8 @@ fn swap_v2<'a, 'b, 'c: 'info, 'info>(
             )
         } else {
             (
-                accounts.user_token1_account.to_account_info(),
-                accounts.user_token0_account.to_account_info(),
+                accounts.recipient_token1_account.to_account_info(),
+                accounts.recipient_token0_account.to_account_info(),
                 accounts.token_vault_1.to_account_info(),
                 accounts.token_vault_0.to_account_info(),
                 accounts.vault_1_mint.to_account_info(),
@@ -606,7 +606,7 @@ fn swap_v2<'a, 'b, 'c: 'info, 'info>(
 
     zap_common::swap_v2_accounts(
         accounts.raydium_clmm_program.to_account_info(),
-        accounts.user.to_account_info(),
+        accounts.signer.to_account_info(),
         accounts.amm_config.to_account_info(),
         accounts.pool_state.to_account_info(),
         accounts.observation_state.to_account_info(),

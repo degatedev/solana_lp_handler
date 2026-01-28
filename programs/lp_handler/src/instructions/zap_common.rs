@@ -19,7 +19,7 @@ use crate::{utils, LpDepositError, LpHandlerIncreaseLiquidityEvent};
 /// 的重复逻辑抽到一个地方。
 pub trait ZapCommonAccounts<'info> {
     fn raydium_clmm_program(&self) -> &Program<'info, AmmV3>;
-    fn user(&self) -> &Signer<'info>;
+    fn signer(&self) -> &Signer<'info>;
 
     fn fee_owner(&self) -> &SystemAccount<'info>;
     fn fee_token0_account(&self) -> &Box<InterfaceAccount<'info, TokenAccount>>;
@@ -29,8 +29,8 @@ pub trait ZapCommonAccounts<'info> {
     fn pool_state(&self) -> &AccountLoader<'info, PoolState>;
     fn observation_state(&self) -> &AccountLoader<'info, ObservationState>;
 
-    fn user_token0_account(&mut self) -> &mut Box<InterfaceAccount<'info, TokenAccount>>;
-    fn user_token1_account(&mut self) -> &mut Box<InterfaceAccount<'info, TokenAccount>>;
+    fn signer_token0_account(&mut self) -> &mut Box<InterfaceAccount<'info, TokenAccount>>;
+    fn signer_token1_account(&mut self) -> &mut Box<InterfaceAccount<'info, TokenAccount>>;
 
     fn memo_program(&self) -> &Program<'info, Memo>;
     fn token_vault_0(&self) -> &Box<InterfaceAccount<'info, TokenAccount>>;
@@ -56,8 +56,8 @@ macro_rules! impl_zap_common_accounts {
             fn raydium_clmm_program(&self) -> &Program<'info, AmmV3> {
                 &self.raydium_clmm_program
             }
-            fn user(&self) -> &Signer<'info> {
-                &self.user
+            fn signer(&self) -> &Signer<'info> {
+                &self.signer
             }
 
             fn fee_owner(&self) -> &SystemAccount<'info> {
@@ -80,11 +80,11 @@ macro_rules! impl_zap_common_accounts {
                 &self.observation_state
             }
 
-            fn user_token0_account(&mut self) -> &mut Box<InterfaceAccount<'info, TokenAccount>> {
-                &mut self.user_token0_account
+            fn signer_token0_account(&mut self) -> &mut Box<InterfaceAccount<'info, TokenAccount>> {
+                &mut self.signer_token0_account
             }
-            fn user_token1_account(&mut self) -> &mut Box<InterfaceAccount<'info, TokenAccount>> {
-                &mut self.user_token1_account
+            fn signer_token1_account(&mut self) -> &mut Box<InterfaceAccount<'info, TokenAccount>> {
+                &mut self.signer_token1_account
             }
 
             fn memo_program(&self) -> &Program<'info, Memo> {
@@ -221,8 +221,8 @@ pub fn prepare_zap_plan_and_swap_if_needed<'info>(
         };
     }
 
-    let balance_0_before = accounts.user_token0_account().amount;
-    let balance_1_before = accounts.user_token1_account().amount;
+    let balance_0_before = accounts.signer_token0_account().amount;
+    let balance_1_before = accounts.signer_token1_account().amount;
 
     // 校验：用户至少拥有本次允许的最大投入
     require!(
@@ -277,11 +277,11 @@ pub fn prepare_zap_plan_and_swap_if_needed<'info>(
             swap_remaining_slice.to_vec(),
         )?;
 
-        accounts.user_token0_account().reload()?;
-        accounts.user_token1_account().reload()?;
+        accounts.signer_token0_account().reload()?;
+        accounts.signer_token1_account().reload()?;
 
-        let balance_0_after_swap = accounts.user_token0_account().amount;
-        let balance_1_after_swap = accounts.user_token1_account().amount;
+        let balance_0_after_swap = accounts.signer_token0_account().amount;
+        let balance_1_after_swap = accounts.signer_token1_account().amount;
 
         let spent_in = if exec_swap_input_is_token0 {
             balance_0_before
@@ -396,11 +396,11 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
     swap_remaining: &'info [AccountInfo<'info>],
     position_nft_mint: Pubkey,
 ) -> Result<u64> {
-    accounts.user_token0_account().reload()?;
-    accounts.user_token1_account().reload()?;
+    accounts.signer_token0_account().reload()?;
+    accounts.signer_token1_account().reload()?;
 
-    let balance_0_after_cpi = accounts.user_token0_account().amount;
-    let balance_1_after_cpi = accounts.user_token1_account().amount;
+    let balance_0_after_cpi = accounts.signer_token0_account().amount;
+    let balance_1_after_cpi = accounts.signer_token1_account().amount;
 
     // CPI 实际花费（<= amount_max）
     let spent_0 = balance_0_pre_cpi
@@ -428,7 +428,7 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
             // token0 作为返回币种
             let mut out_from_swap = 0u64;
             if leftover_1 > 0 {
-                let before0 = accounts.user_token0_account().amount;
+                let before0 = accounts.signer_token0_account().amount;
                 let sqrt_price_x64 = {
                     let pool_state = accounts.pool_state().load()?;
                     pool_state.sqrt_price_x64
@@ -449,9 +449,9 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
                         false,
                         swap_remaining.to_vec(),
                     )?;
-                    accounts.user_token0_account().reload()?;
+                    accounts.signer_token0_account().reload()?;
                     out_from_swap = accounts
-                        .user_token0_account()
+                        .signer_token0_account()
                         .amount
                         .checked_sub(before0)
                         .unwrap_or(0);
@@ -461,13 +461,13 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
                     if accounts.vault_1_mint().key()
                         != anchor_spl::token::spl_token::native_mint::ID
                     {
-                        let signer_ai = accounts.user().to_account_info();
+                        let signer_ai = accounts.signer().to_account_info();
                         let fee_to_ai = accounts.fee_token1_account().to_account_info();
                         let mint_ai = accounts.vault_1_mint().to_account_info();
                         let mint_decimals = accounts.vault_1_mint().decimals;
                         let token_program_ai = accounts.token_program().to_account_info();
                         let token_program_2022_ai = accounts.token_program_2022().to_account_info();
-                        let from_ai = accounts.user_token1_account().to_account_info();
+                        let from_ai = accounts.signer_token1_account().to_account_info();
                         transfer_token_to_fee_accounts(
                             signer_ai,
                             from_ai,
@@ -478,7 +478,7 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
                             Some(token_program_2022_ai),
                             leftover_1,
                         )?;
-                        accounts.user_token1_account().reload()?;
+                        accounts.signer_token1_account().reload()?;
                     }
                 }
             }
@@ -487,7 +487,7 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
             // token1 作为返回币种
             let mut out_from_swap = 0u64;
             if leftover_0 > 0 {
-                let before1 = accounts.user_token1_account().amount;
+                let before1 = accounts.signer_token1_account().amount;
                 let sqrt_price_x64 = {
                     let pool_state = accounts.pool_state().load()?;
                     pool_state.sqrt_price_x64
@@ -508,9 +508,9 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
                         true,
                         swap_remaining.to_vec(),
                     )?;
-                    accounts.user_token1_account().reload()?;
+                    accounts.signer_token1_account().reload()?;
                     out_from_swap = accounts
-                        .user_token1_account()
+                        .signer_token1_account()
                         .amount
                         .checked_sub(before1)
                         .unwrap_or(0);
@@ -520,13 +520,13 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
                     if accounts.vault_0_mint().key()
                         != anchor_spl::token::spl_token::native_mint::ID
                     {
-                        let signer_ai = accounts.user().to_account_info();
+                        let signer_ai = accounts.signer().to_account_info();
                         let fee_to_ai = accounts.fee_token0_account().to_account_info();
                         let mint_ai = accounts.vault_0_mint().to_account_info();
                         let mint_decimals = accounts.vault_0_mint().decimals;
                         let token_program_ai = accounts.token_program().to_account_info();
                         let token_program_2022_ai = accounts.token_program_2022().to_account_info();
-                        let from_ai = accounts.user_token0_account().to_account_info();
+                        let from_ai = accounts.signer_token0_account().to_account_info();
                         transfer_token_to_fee_accounts(
                             signer_ai,
                             from_ai,
@@ -537,7 +537,7 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
                             Some(token_program_2022_ai),
                             leftover_0,
                         )?;
-                        accounts.user_token0_account().reload()?;
+                        accounts.signer_token0_account().reload()?;
                     }
                 }
             }
@@ -546,7 +546,6 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
     }
 
     emit!(LpHandlerIncreaseLiquidityEvent {
-        user: accounts.user().key(),
         pool: accounts.pool_state().key(),
         position_nft_mint,
         principal_0: spent_0,
@@ -563,9 +562,9 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
     });
 
     // 这里必须先把 AccountInfo 拷贝出来，避免同时出现 &self / &mut self 的借用冲突
-    let user_ai = accounts.user().to_account_info();
-    let user_token0_ai = { accounts.user_token0_account().to_account_info() };
-    let user_token1_ai = { accounts.user_token1_account().to_account_info() };
+    let user_ai = accounts.signer().to_account_info();
+    let user_token0_ai = { accounts.signer_token0_account().to_account_info() };
+    let user_token1_ai = { accounts.signer_token1_account().to_account_info() };
     let token_program_ai = accounts.token_program().to_account_info();
     let token_program_2022_ai = accounts.token_program_2022().to_account_info();
     let associated_token_program_ai = accounts.associated_token_program().to_account_info();
@@ -658,7 +657,7 @@ fn swap_v2_common<'info>(
     let cpi_program = accounts.raydium_clmm_program().to_account_info();
 
     // 先把会用到的 AccountInfo “拷贝出来”，避免 &mut self 多重借用冲突
-    let payer_ai = accounts.user().to_account_info();
+    let payer_ai = accounts.signer().to_account_info();
     let amm_config_ai = accounts.amm_config().to_account_info();
     let pool_state_ai = accounts.pool_state().to_account_info();
     let observation_state_ai = accounts.observation_state().to_account_info();
@@ -666,8 +665,8 @@ fn swap_v2_common<'info>(
     let token_program_2022_ai = accounts.token_program_2022().to_account_info();
     let memo_program_ai = accounts.memo_program().to_account_info();
 
-    let user_token0_ai = accounts.user_token0_account().to_account_info();
-    let user_token1_ai = accounts.user_token1_account().to_account_info();
+    let user_token0_ai = accounts.signer_token0_account().to_account_info();
+    let user_token1_ai = accounts.signer_token1_account().to_account_info();
     let token_vault_0_ai = accounts.token_vault_0().to_account_info();
     let token_vault_1_ai = accounts.token_vault_1().to_account_info();
     let vault_0_mint_ai = accounts.vault_0_mint().to_account_info();
@@ -722,9 +721,9 @@ fn swap_v2_common<'info>(
     )
 }
 
-// unwrap wSOL ATA：仅当传入的 token account 确实是 user 的 wSOL ATA 时才执行关闭（否则跳过）
+// unwrap wSOL ATA：仅当传入的 token account 确实是 signer 的 wSOL ATA 时才执行关闭（否则跳过）
 pub fn unwrap_wsol_ata_if_needed<'info>(
-    user: AccountInfo<'info>,
+    signer: AccountInfo<'info>,
     token_accounts: [AccountInfo<'info>; 2],
     token_program: AccountInfo<'info>,
     token_program_2022: Option<AccountInfo<'info>>,
@@ -733,15 +732,15 @@ pub fn unwrap_wsol_ata_if_needed<'info>(
     // wSOL = SPL Token native mint
     let wsol_mint_key = anchor_spl::token::spl_token::native_mint::ID;
 
-    // native(wSOL) 账户允许在 amount != 0 时 close：lamports 会退回 destination（这里是 user），效果等同 unwrap
+    // native(wSOL) 账户允许在 amount != 0 时 close：lamports 会退回 destination（这里是 signer），效果等同 unwrap
     for token_acc in token_accounts.iter() {
-        // 仅关闭 user 的 ATA；不是就跳过（不报错）
+        // 仅关闭 signer 的 ATA；不是就跳过（不报错）
         let token_program_for_ata = match token_program_2022.as_ref() {
             Some(tp22) if token_acc.owner == tp22.key => tp22.key(),
             _ => token_program.key(),
         };
         let expected_ata = utils::derive_ata_address(
-            &user.key(),
+            &signer.key(),
             &wsol_mint_key,
             &token_program_for_ata,
             &associated_token_program.key(),
@@ -756,8 +755,8 @@ pub fn unwrap_wsol_ata_if_needed<'info>(
                     tp22.to_account_info(),
                     token_2022::CloseAccount {
                         account: token_acc.to_account_info(),
-                        destination: user.to_account_info(),
-                        authority: user.to_account_info(),
+                        destination: signer.to_account_info(),
+                        authority: signer.to_account_info(),
                     },
                 ))?;
             }
@@ -766,8 +765,8 @@ pub fn unwrap_wsol_ata_if_needed<'info>(
                     token_program.to_account_info(),
                     token::CloseAccount {
                         account: token_acc.to_account_info(),
-                        destination: user.to_account_info(),
-                        authority: user.to_account_info(),
+                        destination: signer.to_account_info(),
+                        authority: signer.to_account_info(),
                     },
                 ))?;
             }

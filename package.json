@@ -4,15 +4,18 @@
     "lint:fix": "prettier */*.js \"*/**/*{.js,.ts}\" -w",
     "lint": "prettier */*.js \"*/**/*{.js,.ts}\" --check",
     "build": "anchor build",
-    "deploy": "anchor build && anchor deploy --program-name lp_handler --provider.cluster mainnet --provider.wallet ./wallet/mainnet.json --program-keypair ./id/lp_handler-keypair.json"
+    "cli": "ts-node scripts/cli.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "0.31.1",
     "@raydium-io/raydium-sdk-v2": "^0.2.30-alpha",
     "@solana/spl-token": "^0.4.14",
     "@solana/web3.js": "^1.98.4",
-    "decimal.js": "2.5.1",
-    "dotenv": "^17.2.3"
+    "decimal.js": "^10.6.0",
+    "dotenv": "^17.2.3",
+    "enquirer": "^2.4.1",
+    "prompts": "^2.4.2",
+    "ts-node": "^10.9.2"
   },
   "devDependencies": {
     "@types/bn.js": "^5.1.0",

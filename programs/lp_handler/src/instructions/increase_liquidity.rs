@@ -37,18 +37,32 @@ pub struct IncreaseLiquidity<'info> {
 
     /// 支付者 / 签名者
     #[account(mut)]
-    pub user: Signer<'info>,
+    pub signer: Signer<'info>,
 
-    /// 为该 position 增加流动性
-    #[account(mut, constraint = personal_position.pool_id == pool_state.key())]
-    pub personal_position: Box<Account<'info, PersonalPositionState>>,
+    #[account(
+        mut,
+        token::mint = token_vault_0.mint,
+        token::authority = signer,
+    )]
+    pub signer_token0_account: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    #[account(
+        mut,
+        token::mint = token_vault_1.mint,
+        token::authority = signer,
+    )]
+    pub signer_token1_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
     #[account(
         constraint = position_nft_account.mint == personal_position.nft_mint,
         constraint = position_nft_account.amount == 1,
-        token::authority = user
+        token::authority = signer
     )]
     pub position_nft_account: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    /// 为该 position 增加流动性
+    #[account(mut, constraint = personal_position.pool_id == pool_state.key())]
+    pub personal_position: Box<Account<'info, PersonalPositionState>>,
 
     /// CHECK: `protocol_position` 已废弃，仅为兼容保留
     pub protocol_position: UncheckedAccount<'info>,
@@ -71,18 +85,6 @@ pub struct IncreaseLiquidity<'info> {
     /// Observation 状态（swap 需要）
     #[account(mut)]
     pub observation_state: AccountLoader<'info, ObservationState>,
-
-    #[account(
-        mut,
-        token::mint = token_vault_0.mint,
-    )]
-    pub user_token0_account: Box<InterfaceAccount<'info, TokenAccount>>,
-
-    #[account(
-        mut,
-        token::mint = token_vault_1.mint,
-    )]
-    pub user_token1_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
     #[account(mut)]
     pub fee_owner: SystemAccount<'info>,
@@ -244,15 +246,15 @@ fn increase_liquidity_v2<'a, 'b, 'c: 'info, 'info>(
     // 使用解构简化代码
     let accounts = &ctx.accounts;
     let cpi_accounts = clmm_accounts::IncreaseLiquidityV2 {
-        nft_owner: accounts.user.to_account_info(),
+        nft_owner: accounts.signer.to_account_info(),
         nft_account: accounts.position_nft_account.to_account_info(),
         pool_state: accounts.pool_state.to_account_info(),
         protocol_position: accounts.protocol_position.to_account_info(),
         tick_array_lower: accounts.tick_array_lower.to_account_info(),
         tick_array_upper: accounts.tick_array_upper.to_account_info(),
         personal_position: accounts.personal_position.to_account_info(),
-        token_account_0: accounts.user_token0_account.to_account_info(),
-        token_account_1: accounts.user_token1_account.to_account_info(),
+        token_account_0: accounts.signer_token0_account.to_account_info(),
+        token_account_1: accounts.signer_token1_account.to_account_info(),
         token_vault_0: accounts.token_vault_0.to_account_info(),
         token_vault_1: accounts.token_vault_1.to_account_info(),
         token_program: accounts.token_program.to_account_info(),

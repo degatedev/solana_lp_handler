@@ -12,7 +12,7 @@ use state::*;
 
 // ProgramId 需要与部署的 program keypair 对应的地址一致。
 // 本分支统一使用生产环境（mainnet）的 ProgramId。
-declare_id!("EYe96C9WKhdyTxBsAAtULnG8EHhcpzY6XSc4fJugPeRX");
+declare_id!("5Qr4acBCuuB5iuhTBN5Zrf3N97xNh1qThTDuar5SpSDD");
 
 #[program]
 #[allow(deprecated)]
@@ -21,33 +21,34 @@ pub mod lp_handler {
 
     /// 强制所有入口使用同一套“入口检查 → 业务逻辑 → 出口检查”包装。
     ///
-    /// - **user**: 本次指令的签名者（用于权限对账/黑名单）
-    /// - **extra_authorities**: 业务允许出现的“新增 token account authority”白名单补充（如 `position_nft_owner`、`fee_owner`）
+    /// - **signer**: 本次指令的签名者（安全层会对其 token accounts 做 authority/delegate/close_authority 对账）
+    /// - **recipient**: 本次指令允许的“收款/接收方”（用于出口阶段允许新建 token account 的 authority）
     /// - **pool_state**: 本次业务涉及的 pool_state（用于 pool 白名单校验）
     macro_rules! secure_entrypoint {
         (
             $ctx:expr,
-            user = $user:expr,
-            fee_owner = $fee_owner:expr,
-            extra_authorities = $extra:expr,
+            signer = $signer:expr,
+            recipient = $recipient:expr,
             pool_state = $pool:expr,
             body = $body:expr
         ) => {{
-            // 为降低 SBF 堆内存峰值：不再把 remaining_accounts 合并进同一个 Vec<AccountInfo>。
-            // 安全层入口/出口对账仅针对 ctx.accounts；remaining_accounts 只做专项校验（分隔符等）。
+            // 内存优化取舍：
+            // - 安全层主扫描对象仍以 ctx.accounts 为主；
+            // - remaining_accounts 仍做入口阶段分隔符专项校验；
+            // - 另外：会把 remaining_accounts 中 authority==signer 的 token accounts 纳入快照，
+            //   并在出口对账时一并校验其权限变更（通过 AccountInfo clone 持有引用，避免在 body 之后再借用 ctx）。
             let accounts = $ctx.accounts.to_account_infos();
             let policy = sec::resolve_policy(&accounts)?;
             let snapshot = sec::entry_check_and_snapshot(
                 &accounts,
                 $ctx.remaining_accounts,
                 $pool,
-                $user,
-                $fee_owner,
-                $extra,
+                $signer,
+                $recipient,
                 &policy,
             )?;
             let res = $body;
-            sec::exit_check(&accounts, $user, $extra, &policy, snapshot)?;
+            sec::exit_check(&accounts, $signer, $recipient, &policy, snapshot)?;
             res
         }};
     }
@@ -66,14 +67,12 @@ pub mod lp_handler {
         swap_min_out: u64,
         swap_input_is_token0: bool,
     ) -> Result<()> {
-        let user = ctx.accounts.user.key();
-        let fee_owner = ctx.accounts.fee_owner.key();
-        let position_nft_owner = ctx.accounts.position_nft_owner.key();
+        let signer = ctx.accounts.signer.key();
+        let recipient = ctx.accounts.recipient.key();
         secure_entrypoint!(
             ctx,
-            user = user,
-            fee_owner = fee_owner,
-            extra_authorities = &[position_nft_owner],
+            signer = signer,
+            recipient = recipient,
             pool_state = &ctx.accounts.pool_state,
             body = instructions::swap_and_deposit(
                 ctx,
@@ -92,8 +91,6 @@ pub mod lp_handler {
 
     /// 减少 CLMM 流动性并按业务规则处理奖励/手续费。
     ///
-    /// 注意：
-    /// - 业务侧 `fee_owner` 的校验仍在指令实现里完成；
     /// - 安全层会做入口/出口对账（含 token authority/delegate/close_authority 等）。
     pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
         ctx: Context<'a, 'b, 'c, 'info, DecreaseLiquidity<'info>>,
@@ -105,13 +102,12 @@ pub mod lp_handler {
         fee_percent: u16,
         convert_to_usdc: bool,
     ) -> Result<()> {
-        let user = ctx.accounts.user.key();
-        let fee_owner = ctx.accounts.fee_owner.key();
+        let signer = ctx.accounts.signer.key();
+        let recipient = ctx.accounts.recipient.key();
         secure_entrypoint!(
             ctx,
-            user = user,
-            fee_owner = fee_owner,
-            extra_authorities = &[],
+            signer = signer,
+            recipient = recipient,
             pool_state = &ctx.accounts.pool_state,
             body = instructions::decrease_liquidity(
                 ctx,
@@ -138,13 +134,11 @@ pub mod lp_handler {
         swap_min_out: u64,
         swap_input_is_token0: bool,
     ) -> Result<()> {
-        let user = ctx.accounts.user.key();
-        let fee_owner = ctx.accounts.fee_owner.key();
+        let signer = ctx.accounts.signer.key();
         secure_entrypoint!(
             ctx,
-            user = user,
-            fee_owner = fee_owner,
-            extra_authorities = &[],
+            signer = signer,
+            recipient = signer,
             pool_state = &ctx.accounts.pool_state,
             body = instructions::increase_liquidity(
                 ctx,
@@ -166,16 +160,18 @@ pub mod lp_handler {
     pub fn init_security_config(
         ctx: Context<InitSecurityConfig>,
         pools: Vec<Pubkey>,
+        fee_owners: Vec<Pubkey>,
     ) -> Result<()> {
-        instructions::init_security_config(ctx, pools)
+        instructions::init_security_config(ctx, pools, fee_owners)
     }
 
     /// 更新 pool 白名单 PDA（仅管理员可更新）。
     pub fn update_security_config(
         ctx: Context<UpdateSecurityConfig>,
         pools: Vec<Pubkey>,
+        fee_owners: Vec<Pubkey>,
     ) -> Result<()> {
-        instructions::update_security_config(ctx, pools)
+        instructions::update_security_config(ctx, pools, fee_owners)
     }
 
     /// 关闭 security_config PDA 并回收租金到 receiver。

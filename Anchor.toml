@@ -7,18 +7,14 @@ resolution = true
 skip-lint = false
 
 [programs.mainnet]
-# 这里是主网 program id
-lp_handler = "EYe96C9WKhdyTxBsAAtULnG8EHhcpzY6XSc4fJugPeRX"
+lp_handler = "5Qr4acBCuuB5iuhTBN5Zrf3N97xNh1qThTDuar5SpSDD"
 
 [registry]
 url = "https://api.apr.dev"
 
 [provider]
-# 统一使用生产环境（mainnet）。
-# 如需使用自定义 RPC（例如 QuickNode），请通过环境变量覆盖：
-# - ANCHOR_PROVIDER_URL=https://<your-mainnet-rpc>
 cluster = "mainnet"
-wallet = "./wallet/mainnet.json"
+wallet = "~/.config/solana/id.json"
 
 [scripts]
 test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 \"tests/**/*.ts\""

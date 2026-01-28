@@ -7,7 +7,7 @@ resolution = true
 skip-lint = false
 
 [programs.mainnet]
-lp_handler = "5Qr4acBCuuB5iuhTBN5Zrf3N97xNh1qThTDuar5SpSDD"
+lp_handler = "DNPzTxHx6ortBYLx83nnsG1TeUmkbtqRL41DRAxfZJUS"
 
 [registry]
 url = "https://api.apr.dev"

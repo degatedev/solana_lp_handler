@@ -35,6 +35,7 @@ export const spawnSyncOptions: SpawnSyncOptions = {
 };
 
 export const execSync = (command: string, args: string[], options: SpawnSyncOptions = spawnSyncOptions) => {
+  console.log(`执行命令: ${command} ${args.join(' ')}`);
   const result = spawnSync(command, args, options);
   checkError(result);
   return result;

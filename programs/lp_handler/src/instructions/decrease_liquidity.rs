@@ -31,17 +31,35 @@ pub struct DecreaseLiquidity<'info> {
     #[account(address = raydium_amm_v3::ID)]
     pub raydium_clmm_program: Program<'info, AmmV3>,
 
-    /// CHECK: position NFT 的接收者（owner）。安全层会校验其 authority 关系
+    /// CHECK: withdraw 和 claim 的接收者
+    #[account(mut)]
     pub recipient: UncheckedAccount<'info>,
 
     /// 支付者 / 签名者
     #[account(mut)]
     pub signer: Signer<'info>,
 
+    /// signer 的 token0 TokenAccount（中转账户，swap/扣费都从这里扣）
+    #[account(
+        mut,
+        token::mint = token_vault_0.mint,
+        token::authority = signer,
+    )]
+    pub signer_token0_account: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    /// signer 的 token1 TokenAccount（中转账户，swap/扣费都从这里扣）
+    #[account(
+        mut,
+        token::mint = token_vault_1.mint,
+        token::authority = signer,
+    )]
+    pub signer_token1_account: Box<InterfaceAccount<'info, TokenAccount>>,
+
     /// recipient 的 token0 TokenAccount（通常为 ATA；需前端/调用方确保已创建，或在同笔交易里先创建）
     #[account(
         mut,
         token::mint = token_vault_0.mint,
+        token::authority = recipient,
       )]
     pub recipient_token0_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
@@ -49,6 +67,7 @@ pub struct DecreaseLiquidity<'info> {
     #[account(
         mut,
         token::mint = token_vault_1.mint,
+        token::authority = recipient,
       )]
     pub recipient_token1_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
@@ -187,10 +206,10 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
     );
 
     // -----------------------------------
-    // BEFORE: 读取用户 Token ATA 余额（用于余额差计算）
+    // BEFORE: 读取 signer 中转账户余额（用于余额差计算，避免混用 recipient authority）
     // -----------------------------------
-    let user_token0_balance_before = ctx.accounts.recipient_token0_account.amount;
-    let user_token1_balance_before = ctx.accounts.recipient_token1_account.amount;
+    let signer_token0_balance_before = ctx.accounts.signer_token0_account.amount;
+    let signer_token1_balance_before = ctx.accounts.signer_token1_account.amount;
 
     let sep = crate::ID; // 你的 lp_handler program id（分隔符）
 
@@ -232,28 +251,34 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
         decrease_remaining,
     )?;
 
-    ctx.accounts.recipient_token0_account.reload()?;
-    ctx.accounts.recipient_token1_account.reload()?;
+    ctx.accounts.signer_token0_account.reload()?;
+    ctx.accounts.signer_token1_account.reload()?;
     ctx.accounts.personal_position.reload()?;
 
-    let user_token0_balance_after = ctx.accounts.recipient_token0_account.amount;
-    let user_token1_balance_after = ctx.accounts.recipient_token1_account.amount;
+    let signer_token0_balance_after = ctx.accounts.signer_token0_account.amount;
+    let signer_token1_balance_after = ctx.accounts.signer_token1_account.amount;
 
-    let user_token0_amount = user_token0_balance_after
-        .checked_sub(user_token0_balance_before)
+    let signer_token0_amount = signer_token0_balance_after
+        .checked_sub(signer_token0_balance_before)
         .ok_or(LpDepositError::MathOverflow)?;
-    let user_token1_amount = user_token1_balance_after
-        .checked_sub(user_token1_balance_before)
+    let signer_token1_amount = signer_token1_balance_after
+        .checked_sub(signer_token1_balance_before)
         .ok_or(LpDepositError::MathOverflow)?;
 
     // 所有情况：如果本次操作没有带来任何余额变化（两边增量都为 0），直接失败
     require!(
-        user_token0_amount > 0 || user_token1_amount > 0,
+        signer_token0_amount > 0 || signer_token1_amount > 0,
         LpDepositError::NoBalanceChange
     );
 
-    let reward_gross_0 = user_token0_amount.saturating_sub(principal_expected_0);
-    let reward_gross_1 = user_token1_amount.saturating_sub(principal_expected_1);
+    let reward_gross_0 = signer_token0_amount.saturating_sub(principal_expected_0);
+    let reward_gross_1 = signer_token1_amount.saturating_sub(principal_expected_1);
+
+    // wSOL 手续费要求：
+    // - 如果手续费币种是 wSOL(native mint)，则手续费必须以 SOL(lamports) 形式转给 fee_owner。
+    // - 这里先记录“应扣手续费金额（按 token 最小单位）”，最终在结算阶段统一 unwrap -> system transfer 支付。
+    let mut fee_due_0: u64 = 0;
+    let mut fee_due_1: u64 = 0;
 
     if convert_to_usdc {
         // 兑换到目标币种后再扣手续费（手续费从“最终到手的 reward”中抽取，且用目标币种结算）
@@ -266,14 +291,18 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             // token1 -> token0
             (
                 reward_gross_1,
-                user_token1_amount.checked_sub(reward_gross_1).unwrap_or(0),
+                signer_token1_amount
+                    .checked_sub(reward_gross_1)
+                    .unwrap_or(0),
                 reward_gross_0,
             )
         } else {
             // token0 -> token1
             (
                 reward_gross_0,
-                user_token0_amount.checked_sub(reward_gross_0).unwrap_or(0),
+                signer_token0_amount
+                    .checked_sub(reward_gross_0)
+                    .unwrap_or(0),
                 reward_gross_1,
             )
         };
@@ -282,9 +311,9 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
 
         // 记录兑换前目标币种余额，用于计算 swap 的实际输出
         let target_balance_before_swap = if target_is_token0 {
-            ctx.accounts.recipient_token0_account.amount
+            ctx.accounts.signer_token0_account.amount
         } else {
-            ctx.accounts.recipient_token1_account.amount
+            ctx.accounts.signer_token1_account.amount
         };
 
         // 1) 合并 swap：把 other token 的增量一次性兑换成目标币种（若 total_other_in == 0 则不 swap）
@@ -315,9 +344,9 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
                     &ctx.accounts.signer,
                     &ctx.accounts.fee_owner,
                     if input_is_token0 {
-                        &ctx.accounts.recipient_token0_account
+                        &ctx.accounts.signer_token0_account
                     } else {
-                        &ctx.accounts.recipient_token1_account
+                        &ctx.accounts.signer_token1_account
                     },
                     if input_is_token0 {
                         &ctx.accounts.fee_token0_account
@@ -343,12 +372,12 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
                     input_is_token0,
                     swap_remaining.to_vec(),
                 )?;
-                ctx.accounts.recipient_token0_account.reload()?;
-                ctx.accounts.recipient_token1_account.reload()?;
+                ctx.accounts.signer_token0_account.reload()?;
+                ctx.accounts.signer_token1_account.reload()?;
                 let target_balance_after_swap = if target_is_token0 {
-                    ctx.accounts.recipient_token0_account.amount
+                    ctx.accounts.signer_token0_account.amount
                 } else {
-                    ctx.accounts.recipient_token1_account.amount
+                    ctx.accounts.signer_token1_account.amount
                 };
                 total_out_in_target = target_balance_after_swap
                     .checked_sub(target_balance_before_swap)
@@ -380,29 +409,44 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             .checked_div(10_000)
             .ok_or(LpDepositError::MathOverflow)?;
 
-        zap_common::transfer_fee(
-            &ctx.accounts.signer,
-            &ctx.accounts.fee_owner,
-            if target_is_token0 {
-                &ctx.accounts.recipient_token0_account
-            } else {
-                &ctx.accounts.recipient_token1_account
-            },
-            if target_is_token0 {
-                &ctx.accounts.fee_token0_account
-            } else {
-                &ctx.accounts.fee_token1_account
-            },
-            if target_is_token0 {
-                Some(&ctx.accounts.vault_0_mint)
-            } else {
-                Some(&ctx.accounts.vault_1_mint)
-            },
-            &ctx.accounts.token_program,
-            Some(&ctx.accounts.token_program_2022),
-            &ctx.accounts.system_program,
-            integrator_fee_target,
-        )?;
+        if target_is_token0 {
+            fee_due_0 = integrator_fee_target;
+        } else {
+            fee_due_1 = integrator_fee_target;
+        }
+
+        // 非 wSOL 手续费：可以直接扣 token 给 fee_token_account。
+        // wSOL 手续费：必须收 SOL，因此不在这里扣，留到末尾统一 unwrap 后用 system transfer 支付。
+        let target_is_wsol = if target_is_token0 {
+            ctx.accounts.vault_0_mint.key() == anchor_spl::token::spl_token::native_mint::ID
+        } else {
+            ctx.accounts.vault_1_mint.key() == anchor_spl::token::spl_token::native_mint::ID
+        };
+        if !target_is_wsol {
+            zap_common::transfer_fee(
+                &ctx.accounts.signer,
+                &ctx.accounts.fee_owner,
+                if target_is_token0 {
+                    &ctx.accounts.signer_token0_account
+                } else {
+                    &ctx.accounts.signer_token1_account
+                },
+                if target_is_token0 {
+                    &ctx.accounts.fee_token0_account
+                } else {
+                    &ctx.accounts.fee_token1_account
+                },
+                if target_is_token0 {
+                    Some(&ctx.accounts.vault_0_mint)
+                } else {
+                    Some(&ctx.accounts.vault_1_mint)
+                },
+                &ctx.accounts.token_program,
+                Some(&ctx.accounts.token_program_2022),
+                &ctx.accounts.system_program,
+                integrator_fee_target,
+            )?;
+        }
 
         // 事件按“兑换后”口径输出：只在目标币种上体现 principal/reward/fee，其它币种为 0
         if target_is_token0 {
@@ -452,16 +496,7 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
                 fee_settled_1: integrator_fee_target,
             });
         }
-        zap_common::unwrap_wsol_ata_if_needed(
-            ctx.accounts.signer.to_account_info(),
-            [
-                ctx.accounts.recipient_token0_account.to_account_info(),
-                ctx.accounts.recipient_token1_account.to_account_info(),
-            ],
-            ctx.accounts.token_program.to_account_info(),
-            Some(ctx.accounts.token_program_2022.to_account_info()),
-            ctx.accounts.associated_token_program.to_account_info(),
-        )?;
+        // wSOL unwrap / 手续费支付 / 转给 recipient 统一在函数末尾结算阶段处理。
     } else {
         // 不换币：直接对两种 token 的 reward 部分分别抽成
         let integrator_fee_0 = reward_gross_0
@@ -474,42 +509,47 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             .ok_or(LpDepositError::MathOverflow)?
             .checked_div(10_000)
             .ok_or(LpDepositError::MathOverflow)?;
-        // unwrap wSOL：关闭 authority 的 wSOL ATA，把 lamports 退回 authority
-        zap_common::unwrap_wsol_ata_if_needed(
-            ctx.accounts.signer.to_account_info(),
-            [
-                ctx.accounts.recipient_token0_account.to_account_info(),
-                ctx.accounts.recipient_token1_account.to_account_info(),
-            ],
-            ctx.accounts.token_program.to_account_info(),
-            Some(ctx.accounts.token_program_2022.to_account_info()),
-            ctx.accounts.associated_token_program.to_account_info(),
-        )?;
-        zap_common::transfer_fee(
-            &ctx.accounts.signer,
-            &ctx.accounts.fee_owner,
-            &ctx.accounts.recipient_token0_account,
-            &ctx.accounts.fee_token0_account,
-            Some(&ctx.accounts.vault_0_mint),
-            &ctx.accounts.token_program,
-            Some(&ctx.accounts.token_program_2022),
-            &ctx.accounts.system_program,
-            integrator_fee_0,
-        )?;
-        zap_common::transfer_fee(
-            &ctx.accounts.signer,
-            &ctx.accounts.fee_owner,
-            &ctx.accounts.recipient_token1_account,
-            &ctx.accounts.fee_token1_account,
-            Some(&ctx.accounts.vault_1_mint),
-            &ctx.accounts.token_program,
-            Some(&ctx.accounts.token_program_2022),
-            &ctx.accounts.system_program,
-            integrator_fee_1,
-        )?;
+        fee_due_0 = integrator_fee_0;
+        fee_due_1 = integrator_fee_1;
+
+        let is_wsol_0 =
+            ctx.accounts.vault_0_mint.key() == anchor_spl::token::spl_token::native_mint::ID;
+        let is_wsol_1 =
+            ctx.accounts.vault_1_mint.key() == anchor_spl::token::spl_token::native_mint::ID;
+
+        // 非 wSOL 手续费：直接扣 token 给 fee_token_account。
+        // wSOL 手续费：必须收 SOL，因此不在这里扣，留到末尾统一 unwrap 后用 system transfer 支付。
+        if !is_wsol_0 {
+            zap_common::transfer_fee(
+                &ctx.accounts.signer,
+                &ctx.accounts.fee_owner,
+                &ctx.accounts.signer_token0_account,
+                &ctx.accounts.fee_token0_account,
+                Some(&ctx.accounts.vault_0_mint),
+                &ctx.accounts.token_program,
+                Some(&ctx.accounts.token_program_2022),
+                &ctx.accounts.system_program,
+                integrator_fee_0,
+            )?;
+        }
+
+        if !is_wsol_1 {
+            zap_common::transfer_fee(
+                &ctx.accounts.signer,
+                &ctx.accounts.fee_owner,
+                &ctx.accounts.signer_token1_account,
+                &ctx.accounts.fee_token1_account,
+                Some(&ctx.accounts.vault_1_mint),
+                &ctx.accounts.token_program,
+                Some(&ctx.accounts.token_program_2022),
+                &ctx.accounts.system_program,
+                integrator_fee_1,
+            )?;
+        }
 
         let principal_amount_0 = principal_expected_0;
         let principal_amount_1 = principal_expected_1;
+        // 事件字段仍按“reward 口径 - fee”展示（与实际扣费一致）
         let reward_amount_0 = reward_gross_0
             .checked_sub(integrator_fee_0)
             .ok_or(LpDepositError::MathOverflow)?;
@@ -532,6 +572,141 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             fee_settled_0: integrator_fee_0,
             fee_settled_1: integrator_fee_1,
         });
+    }
+
+    // 最后：统一结算转给 recipient（若 recipient==signer 则跳过），并处理 wSOL 的 unwrap 与 SOL 手续费支付。
+    ctx.accounts.signer_token0_account.reload()?;
+    ctx.accounts.signer_token1_account.reload()?;
+    let net0 = ctx
+        .accounts
+        .signer_token0_account
+        .amount
+        .checked_sub(signer_token0_balance_before)
+        .unwrap_or(0);
+    let net1 = ctx
+        .accounts
+        .signer_token1_account
+        .amount
+        .checked_sub(signer_token1_balance_before)
+        .unwrap_or(0);
+
+    let recipient_is_signer = ctx.accounts.recipient.key() == ctx.accounts.signer.key();
+    let is_wsol_0 =
+        ctx.accounts.vault_0_mint.key() == anchor_spl::token::spl_token::native_mint::ID;
+    let is_wsol_1 =
+        ctx.accounts.vault_1_mint.key() == anchor_spl::token::spl_token::native_mint::ID;
+
+    // token0 结算
+    if net0 > 0 {
+        if is_wsol_0 {
+            require!(net0 >= fee_due_0, LpDepositError::MathOverflow);
+
+            // unwrap：close wSOL token account，把 lamports 退回 signer
+            zap_common::unwrap_wsol_to_destination(
+                ctx.accounts.signer.to_account_info(),
+                ctx.accounts.signer_token0_account.to_account_info(),
+                ctx.accounts.signer.to_account_info(),
+                ctx.accounts.token_program.to_account_info(),
+                Some(ctx.accounts.token_program_2022.to_account_info()),
+            )?;
+
+            // fee：以 SOL(lamports) 支付给 fee_owner
+            if fee_due_0 > 0 {
+                anchor_lang::system_program::transfer(
+                    CpiContext::new(
+                        ctx.accounts.system_program.to_account_info(),
+                        anchor_lang::system_program::Transfer {
+                            from: ctx.accounts.signer.to_account_info(),
+                            to: ctx.accounts.fee_owner.to_account_info(),
+                        },
+                    ),
+                    fee_due_0,
+                )?;
+            }
+
+            // remainder：给 recipient（若 recipient != signer）
+            let rem = net0
+                .checked_sub(fee_due_0)
+                .ok_or(LpDepositError::MathOverflow)?;
+            if !recipient_is_signer && rem > 0 {
+                anchor_lang::system_program::transfer(
+                    CpiContext::new(
+                        ctx.accounts.system_program.to_account_info(),
+                        anchor_lang::system_program::Transfer {
+                            from: ctx.accounts.signer.to_account_info(),
+                            to: ctx.accounts.recipient.to_account_info(),
+                        },
+                    ),
+                    rem,
+                )?;
+            }
+        } else if !recipient_is_signer {
+            zap_common::transfer_token_to_fee_accounts(
+                ctx.accounts.signer.to_account_info(),
+                ctx.accounts.signer_token0_account.to_account_info(),
+                ctx.accounts.recipient_token0_account.to_account_info(),
+                ctx.accounts.vault_0_mint.to_account_info(),
+                ctx.accounts.vault_0_mint.decimals,
+                ctx.accounts.token_program.to_account_info(),
+                Some(ctx.accounts.token_program_2022.to_account_info()),
+                net0,
+            )?;
+        }
+    }
+
+    // token1 结算
+    if net1 > 0 {
+        if is_wsol_1 {
+            require!(net1 >= fee_due_1, LpDepositError::MathOverflow);
+
+            zap_common::unwrap_wsol_to_destination(
+                ctx.accounts.signer.to_account_info(),
+                ctx.accounts.signer_token1_account.to_account_info(),
+                ctx.accounts.signer.to_account_info(),
+                ctx.accounts.token_program.to_account_info(),
+                Some(ctx.accounts.token_program_2022.to_account_info()),
+            )?;
+
+            if fee_due_1 > 0 {
+                anchor_lang::system_program::transfer(
+                    CpiContext::new(
+                        ctx.accounts.system_program.to_account_info(),
+                        anchor_lang::system_program::Transfer {
+                            from: ctx.accounts.signer.to_account_info(),
+                            to: ctx.accounts.fee_owner.to_account_info(),
+                        },
+                    ),
+                    fee_due_1,
+                )?;
+            }
+
+            let rem = net1
+                .checked_sub(fee_due_1)
+                .ok_or(LpDepositError::MathOverflow)?;
+            if !recipient_is_signer && rem > 0 {
+                anchor_lang::system_program::transfer(
+                    CpiContext::new(
+                        ctx.accounts.system_program.to_account_info(),
+                        anchor_lang::system_program::Transfer {
+                            from: ctx.accounts.signer.to_account_info(),
+                            to: ctx.accounts.recipient.to_account_info(),
+                        },
+                    ),
+                    rem,
+                )?;
+            }
+        } else if !recipient_is_signer {
+            zap_common::transfer_token_to_fee_accounts(
+                ctx.accounts.signer.to_account_info(),
+                ctx.accounts.signer_token1_account.to_account_info(),
+                ctx.accounts.recipient_token1_account.to_account_info(),
+                ctx.accounts.vault_1_mint.to_account_info(),
+                ctx.accounts.vault_1_mint.decimals,
+                ctx.accounts.token_program.to_account_info(),
+                Some(ctx.accounts.token_program_2022.to_account_info()),
+                net1,
+            )?;
+        }
     }
 
     Ok(())
@@ -558,8 +733,9 @@ fn cpi_decrease_liquidity_v2<'a, 'b, 'c: 'info, 'info>(
         token_vault_1: accounts.token_vault_1.to_account_info(),
         tick_array_lower: accounts.tick_array_lower.to_account_info(),
         tick_array_upper: accounts.tick_array_upper.to_account_info(),
-        recipient_token_account_0: accounts.recipient_token0_account.to_account_info(),
-        recipient_token_account_1: accounts.recipient_token1_account.to_account_info(),
+        // 输出先打到 signer 的中转账户，后续 swap/扣费都从 signer authority 执行
+        recipient_token_account_0: accounts.signer_token0_account.to_account_info(),
+        recipient_token_account_1: accounts.signer_token1_account.to_account_info(),
         token_program: accounts.token_program.to_account_info(),
         token_program_2022: accounts.token_program_2022.to_account_info(),
         memo_program: accounts.memo_program.to_account_info(),
@@ -586,8 +762,8 @@ fn swap_v2<'a, 'b, 'c: 'info, 'info>(
     let (input_token, output_token, input_vault, output_vault, input_mint, output_mint) =
         if is_token0 {
             (
-                accounts.recipient_token0_account.to_account_info(),
-                accounts.recipient_token1_account.to_account_info(),
+                accounts.signer_token0_account.to_account_info(),
+                accounts.signer_token1_account.to_account_info(),
                 accounts.token_vault_0.to_account_info(),
                 accounts.token_vault_1.to_account_info(),
                 accounts.vault_0_mint.to_account_info(),
@@ -595,8 +771,8 @@ fn swap_v2<'a, 'b, 'c: 'info, 'info>(
             )
         } else {
             (
-                accounts.recipient_token1_account.to_account_info(),
-                accounts.recipient_token0_account.to_account_info(),
+                accounts.signer_token1_account.to_account_info(),
+                accounts.signer_token0_account.to_account_info(),
                 accounts.token_vault_1.to_account_info(),
                 accounts.token_vault_0.to_account_info(),
                 accounts.vault_1_mint.to_account_info(),

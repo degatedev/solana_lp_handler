@@ -192,6 +192,8 @@ describe('lp_claim', () => {
         ammConfig: new PublicKey(poolKeys.config.id),
         poolState: pool_address,
         observationState: new PublicKey(poolKeys.observationId),
+        signerToken0Account: userToken0Account.tokenAccount,
+        signerToken1Account: userToken1Account.tokenAccount,
         recipientToken0Account: userToken0Account.tokenAccount,
         recipientToken1Account: userToken1Account.tokenAccount,
         feeOwner: fee_address,

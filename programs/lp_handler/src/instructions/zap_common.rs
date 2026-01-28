@@ -457,7 +457,7 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
                         .unwrap_or(0);
                 } else {
                     // 如果 min_out <= 0，则不进行 swap，把剩余的 token1 直接转账给 fee
-                    // 如果剩余 mint 是 wSOL(native mint)，则不转给 fee（保持留在用户侧，后续由 unwrap_wsol_ata_if_needed 处理）
+                    // 如果剩余 mint 是 wSOL(native mint)，则不转给 fee（保持留在用户侧，函数末尾会统一 close/unwrap 成 SOL）
                     if accounts.vault_1_mint().key()
                         != anchor_spl::token::spl_token::native_mint::ID
                     {
@@ -516,7 +516,7 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
                         .unwrap_or(0);
                 } else {
                     // 如果 min_out <= 0，则不进行 swap，把剩余的 token0 直接转账给 fee
-                    // 如果剩余 mint 是 wSOL(native mint)，则不转给 fee（保持留在用户侧，后续由 unwrap_wsol_ata_if_needed 处理）
+                    // 如果剩余 mint 是 wSOL(native mint)，则不转给 fee（保持留在用户侧，函数末尾会统一 close/unwrap 成 SOL）
                     if accounts.vault_0_mint().key()
                         != anchor_spl::token::spl_token::native_mint::ID
                     {
@@ -567,15 +567,31 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
     let user_token1_ai = { accounts.signer_token1_account().to_account_info() };
     let token_program_ai = accounts.token_program().to_account_info();
     let token_program_2022_ai = accounts.token_program_2022().to_account_info();
-    let associated_token_program_ai = accounts.associated_token_program().to_account_info();
 
-    unwrap_wsol_ata_if_needed(
-        user_ai,
-        [user_token0_ai, user_token1_ai],
-        token_program_ai,
-        Some(token_program_2022_ai),
-        associated_token_program_ai,
-    )?;
+    // 若池子某侧 mint 为 wSOL(native mint)，则强制把对应的 signer token account close 成 SOL。
+    // 这样无论 `recipient` 是否等于 `signer`，用户最终都只会收到 SOL（不残留 wSOL token）。
+    //
+    // 注意：这里会 close 传入的 token account（不要求必须是 ATA）。
+    // 调用方需要确保传入的就是“允许被 close 的 wSOL 账户”（通常为 wSOL ATA）。
+    let wsol_mint_key = anchor_spl::token::spl_token::native_mint::ID;
+    if accounts.vault_0_mint().key() == wsol_mint_key {
+        unwrap_wsol_to_destination(
+            user_ai.clone(),
+            user_token0_ai.clone(),
+            user_ai.clone(),
+            token_program_ai.clone(),
+            Some(token_program_2022_ai.clone()),
+        )?;
+    }
+    if accounts.vault_1_mint().key() == wsol_mint_key {
+        unwrap_wsol_to_destination(
+            user_ai.clone(),
+            user_token1_ai.clone(),
+            user_ai.clone(),
+            token_program_ai.clone(),
+            Some(token_program_2022_ai),
+        )?;
+    }
 
     Ok(return_amount)
 }
@@ -721,59 +737,40 @@ fn swap_v2_common<'info>(
     )
 }
 
-// unwrap wSOL ATA：仅当传入的 token account 确实是 signer 的 wSOL ATA 时才执行关闭（否则跳过）
-pub fn unwrap_wsol_ata_if_needed<'info>(
+/// unwrap wSOL：将一个 **native mint** 的 token account close，并把 lamports 打到指定 destination。
+///
+/// 重要：
+/// - 该方法不会验证 token account 是否为 ATA，也不会检查其初始余额是否为 0；
+///   调用方必须保证“关闭该账户不会误转走历史余额”。
+/// - 对 wSOL(native mint) 来说，close 会把 lamports 退回 destination，效果等同 unwrap。
+pub fn unwrap_wsol_to_destination<'info>(
     signer: AccountInfo<'info>,
-    token_accounts: [AccountInfo<'info>; 2],
+    token_account: AccountInfo<'info>,
+    destination: AccountInfo<'info>,
     token_program: AccountInfo<'info>,
     token_program_2022: Option<AccountInfo<'info>>,
-    associated_token_program: AccountInfo<'info>,
 ) -> Result<()> {
-    // wSOL = SPL Token native mint
-    let wsol_mint_key = anchor_spl::token::spl_token::native_mint::ID;
-
-    // native(wSOL) 账户允许在 amount != 0 时 close：lamports 会退回 destination（这里是 signer），效果等同 unwrap
-    for token_acc in token_accounts.iter() {
-        // 仅关闭 signer 的 ATA；不是就跳过（不报错）
-        let token_program_for_ata = match token_program_2022.as_ref() {
-            Some(tp22) if token_acc.owner == tp22.key => tp22.key(),
-            _ => token_program.key(),
-        };
-        let expected_ata = utils::derive_ata_address(
-            &signer.key(),
-            &wsol_mint_key,
-            &token_program_for_ata,
-            &associated_token_program.key(),
-        );
-        if token_acc.key() != expected_ata {
-            continue;
+    // token account 可能属于 SPL Token 或 Token-2022；按 owner 选择对应 close CPI。
+    match token_program_2022.as_ref() {
+        Some(tp22) if token_account.owner == tp22.key => {
+            token_2022::close_account(CpiContext::new(
+                tp22.to_account_info(),
+                token_2022::CloseAccount {
+                    account: token_account.to_account_info(),
+                    destination: destination.to_account_info(),
+                    authority: signer.to_account_info(),
+                },
+            ))
         }
-
-        match token_program_2022.as_ref() {
-            Some(tp22) if token_acc.owner == tp22.key => {
-                token_2022::close_account(CpiContext::new(
-                    tp22.to_account_info(),
-                    token_2022::CloseAccount {
-                        account: token_acc.to_account_info(),
-                        destination: signer.to_account_info(),
-                        authority: signer.to_account_info(),
-                    },
-                ))?;
-            }
-            _ => {
-                token::close_account(CpiContext::new(
-                    token_program.to_account_info(),
-                    token::CloseAccount {
-                        account: token_acc.to_account_info(),
-                        destination: signer.to_account_info(),
-                        authority: signer.to_account_info(),
-                    },
-                ))?;
-            }
-        }
+        _ => token::close_account(CpiContext::new(
+            token_program.to_account_info(),
+            token::CloseAccount {
+                account: token_account.to_account_info(),
+                destination: destination.to_account_info(),
+                authority: signer.to_account_info(),
+            },
+        )),
     }
-
-    Ok(())
 }
 
 pub fn transfer_fee<'info>(

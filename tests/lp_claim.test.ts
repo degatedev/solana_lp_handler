@@ -244,10 +244,6 @@ describe('lp_claim', () => {
       replaceRecentBlockhash: true,
       innerInstructions: true
     });
-    userWallet.signTransaction(transaction);
-    const txResult = await connection.sendRawTransaction(transaction.serialize(), {
-      skipPreflight: false
-    });
-    console.log('transactionResult', txResult, transactionResult.value.logs);
+    expect(transactionResult.value.err).toBeNull();
   }, 5000000);
 });

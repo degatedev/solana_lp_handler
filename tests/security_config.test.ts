@@ -40,22 +40,7 @@ describe('pool_whitelist', () => {
       replaceRecentBlockhash: true,
       innerInstructions: true
     });
-    const txResult = await connection.sendRawTransaction(tx.serialize(), {
-      skipPreflight: false
-    });
-    console.log('transactionResult', txResult);
-
-    // 这个测试的目标是“指令可构造 + 可跑到合约入口”。
-    // 在 mainnet 上 PDA 可能已存在/authority 可能不匹配，simulate 可能失败；所以不强制要求 err==null。
-    expect(sim.value.logs).toBeDefined();
-    // 尽量断言至少进入过程序
-    const hit = (sim.value.logs || []).some(
-      (l) =>
-        l.includes('Instruction: InitSecurityConfig') ||
-        l.includes('Instruction: UpdateSecurityConfig') ||
-        l.includes('Instruction: CloseSecurityConfig')
-    );
-    expect(hit).toBeTruthy();
+    expect(sim.value.err).toBeNull();
   }, 200000);
   it('builds  update_pool_whitelist instructions', async () => {
     // 说明：这里用 any 绕过 target/types 未及时更新导致的 TS 类型问题；
@@ -89,22 +74,7 @@ describe('pool_whitelist', () => {
       replaceRecentBlockhash: true,
       innerInstructions: true
     });
-    const txResult = await connection.sendRawTransaction(tx.serialize(), {
-      skipPreflight: false
-    });
-    console.log('transactionResult', txResult);
-
-    // 这个测试的目标是“指令可构造 + 可跑到合约入口”。
-    // 在 mainnet 上 PDA 可能已存在/authority 可能不匹配，simulate 可能失败；所以不强制要求 err==null。
-    expect(sim.value.logs).toBeDefined();
-    // 尽量断言至少进入过程序
-    const hit = (sim.value.logs || []).some(
-      (l) =>
-        l.includes('Instruction: InitSecurityConfig') ||
-        l.includes('Instruction: UpdateSecurityConfig') ||
-        l.includes('Instruction: CloseSecurityConfig')
-    );
-    expect(hit).toBeTruthy();
+    expect(sim.value.err).toBeNull();
   }, 200000);
   it('builds closeSecurityConfig ', async () => {
     const closeIx = await program.methods
@@ -136,20 +106,8 @@ describe('pool_whitelist', () => {
       innerInstructions: true
     });
 
-    const txResult = await connection.sendRawTransaction(tx.serialize(), {
-      skipPreflight: false
-    });
-    console.log('txResult', txResult);
     // 这个测试的目标是“指令可构造 + 可跑到合约入口”。
     // 在 mainnet 上 PDA 可能已存在/authority 可能不匹配，simulate 可能失败；所以不强制要求 err==null。
-    expect(sim.value.logs).toBeDefined();
-    // 尽量断言至少进入过程序
-    const hit = (sim.value.logs || []).some(
-      (l) =>
-        l.includes('Instruction: InitSecurityConfig') ||
-        l.includes('Instruction: UpdateSecurityConfig') ||
-        l.includes('Instruction: CloseSecurityConfig')
-    );
-    expect(hit).toBeTruthy();
+    expect(sim.value.err).toBeNull();
   }, 200000);
 });

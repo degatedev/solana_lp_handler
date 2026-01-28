@@ -240,62 +240,6 @@ describe('lp_deposit', () => {
       innerInstructions: true
     });
 
-    userWallet.signTransaction(transaction);
-    transaction.sign([keypair]);
-    const txResult = await connection.sendRawTransaction(transaction.serialize(), {
-      skipPreflight: false
-    });
-    console.log('txResult', txResult);
-    console.log('transactionResult', transactionResult.value.logs);
+    expect(transactionResult.value.err).toBeNull();
   }, 500000);
-
-  test('parse log test', async () => {
-    // 498PU5rrcysb6vaL77DRRfpiF296in484oPqWcNyZTgBvhaa5djiHXLhXHtYaRp35d6AaeduPpbkNrr7nKYfcHMG
-
-    const data = await connection.getParsedTransaction(
-      '3U3CDUMLqf1We1Cq9ULVnjRzk1x7waXJk1jrYSGTr9FfW1ePvRY5zAGwdNAp5tbyAD1YXMZyNNsxTZjTAeWkQbzq',
-      {
-        maxSupportedTransactionVersion: 1,
-        commitment: 'confirmed'
-      }
-    );
-
-    const program1 = new Program(amm_v3, { connection });
-    const parser1 = new anchor.EventParser(program1.programId, program.coder);
-    const events1 = parser1.parseLogs(data?.meta?.logMessages || []);
-    const parser = new anchor.EventParser(program.programId, program.coder);
-    const events = parser.parseLogs(data.meta?.logMessages || []);
-    const list: any[] = [];
-    for (const obj of events) {
-      list.push({ name: obj.name, data: obj.data });
-    }
-    console.log('list', list);
-    const list2: any[] = [];
-    for (const obj of events1) {
-      list2.push({ name: obj.name, data: obj.data });
-    }
-    console.log('list2', list2);
-  });
-
-  // test('test', async () => {
-  //   const ata = await getTokenAta(connection, new PublicKey('So11111111111111111111111111111111111111112'), caller);
-  //   const tx = new Transaction().add(
-  //     ata.instruction,
-  //     SystemProgram.transfer({
-  //       fromPubkey: caller,
-  //       toPubkey: ata.tokenAccount,
-  //       lamports: 2 * 1e9 // 0.5 SOL
-  //     }),
-  //     // 3) 同步，使其变成 WSOL 余额
-  //     createSyncNativeInstruction(ata.tokenAccount)
-  //   );
-  //   tx.feePayer = caller;
-  //   tx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
-  //   userWallet.signTransaction(tx);
-
-  //   const txResult = await connection.sendRawTransaction(tx.serialize(), {
-  //     skipPreflight: true
-  //   });
-  //   console.log('txResult', txResult);
-  // });
 });

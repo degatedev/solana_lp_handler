@@ -1,6 +1,5 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_pack::Pack;
-use anchor_spl::token_2022::spl_token_2022::extension::BaseStateWithExtensions;
 use raydium_amm_v3::states::PoolState;
 
 use crate::LpDepositError;
@@ -222,7 +221,6 @@ pub fn entry_check_and_snapshot<'info>(
     pool_state: &AccountLoader<'info, PoolState>,
     user: Pubkey,
     fee_owner: Pubkey,
-    position_nft_mint: Option<Pubkey>,
     additional_allowed_token_authorities: &[Pubkey],
     _policy: &SecurityPolicy,
 ) -> Result<SecuritySnapshot> {
@@ -272,11 +270,6 @@ pub fn entry_check_and_snapshot<'info>(
     let mut uninitialized_indices: Vec<usize> = Vec::new();
     let pool_state_data = pool_state.load()?;
 
-    // 仅放行“池子 token mint(0/1)”带 PermanentDelegate
-    // 直接使用 pool_state 里的 token_mint_0/1
-    let vault_mint_0 = pool_state_data.token_mint_0;
-    let vault_mint_1 = pool_state_data.token_mint_1;
-
     for (idx, ai) in accounts.iter().enumerate() {
         // 可执行 program 白名单（按 key）
         if ai.executable {
@@ -286,62 +279,6 @@ pub fn entry_check_and_snapshot<'info>(
                     .any(|k| k == &ai.key()),
                 LpDepositError::SecurityUnauthorizedExecutableProgram
             );
-        }
-
-        // Token-2022 mint 扩展风险检查
-        // - 不调用 `get_extension_types()`（它会分配 Vec）
-        // - 仅当该账户能被解包为 Token-2022 Mint 时才检查
-        if ai.owner == &anchor_spl::token_2022::ID {
-            // 跳过 position NFT mint 的检查
-            if let Some(nft_mint) = position_nft_mint {
-                if ai.key() == nft_mint {
-                    continue;
-                }
-            }
-            let mint_key = ai.key();
-            let data = ai.data.borrow();
-            if let Ok(state) =
-                anchor_spl::token_2022::spl_token_2022::extension::StateWithExtensions::<
-                    anchor_spl::token_2022::spl_token_2022::state::Mint,
-                >::unpack(&data)
-            {
-                use anchor_spl::token_2022::spl_token_2022::extension as ext;
-                // 命中任何高风险扩展就拒绝，同时输出 data log 方便定位是哪一个 mint 触发。
-                if state
-                    .get_extension::<ext::permanent_delegate::PermanentDelegate>()
-                    .is_ok()
-                {
-                    // 放行：池子 vault mint 允许 PermanentDelegate（否则无法支持该资产）
-                    if vault_mint_0 != mint_key && vault_mint_1 != mint_key {
-                        msg!("forbidden_token2022_mint: PermanentDelegate{}", mint_key);
-                        return err!(LpDepositError::SecurityToken2022ForbiddenExtension);
-                    }
-                }
-                if state
-                    .get_extension::<ext::transfer_hook::TransferHook>()
-                    .is_ok()
-                {
-                    msg!("forbidden_token2022_mint: TransferHook {}", mint_key);
-                    return err!(LpDepositError::SecurityToken2022ForbiddenExtension);
-                }
-                if state
-                    .get_extension::<ext::confidential_transfer::ConfidentialTransferMint>()
-                    .is_ok()
-                {
-                    msg!(
-                        "forbidden_token2022_mint:ConfidentialTransferMint {}",
-                        mint_key
-                    );
-                    return err!(LpDepositError::SecurityToken2022ForbiddenExtension);
-                }
-                if state
-                    .get_extension::<ext::non_transferable::NonTransferable>()
-                    .is_ok()
-                {
-                    msg!("forbidden_token2022_mint:NonTransferable {}", mint_key);
-                    return err!(LpDepositError::SecurityToken2022ForbiddenExtension);
-                }
-            }
         }
 
         if is_uninitialized_account(ai) {

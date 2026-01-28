@@ -29,7 +29,6 @@ pub mod lp_handler {
             $ctx:expr,
             user = $user:expr,
             fee_owner = $fee_owner:expr,
-            position_nft_mint = $position_nft_mint:expr,
             extra_authorities = $extra:expr,
             pool_state = $pool:expr,
             body = $body:expr
@@ -44,7 +43,6 @@ pub mod lp_handler {
                 $pool,
                 $user,
                 $fee_owner,
-                $position_nft_mint,
                 $extra,
                 &policy,
             )?;
@@ -71,12 +69,10 @@ pub mod lp_handler {
         let user = ctx.accounts.user.key();
         let fee_owner = ctx.accounts.fee_owner.key();
         let position_nft_owner = ctx.accounts.position_nft_owner.key();
-        let position_nft_mint = Some(ctx.accounts.position_nft_mint.key());
         secure_entrypoint!(
             ctx,
             user = user,
             fee_owner = fee_owner,
-            position_nft_mint = position_nft_mint,
             extra_authorities = &[position_nft_owner],
             pool_state = &ctx.accounts.pool_state,
             body = instructions::swap_and_deposit(
@@ -115,7 +111,6 @@ pub mod lp_handler {
             ctx,
             user = user,
             fee_owner = fee_owner,
-            position_nft_mint = None,
             extra_authorities = &[],
             pool_state = &ctx.accounts.pool_state,
             body = instructions::decrease_liquidity(
@@ -145,12 +140,10 @@ pub mod lp_handler {
     ) -> Result<()> {
         let user = ctx.accounts.user.key();
         let fee_owner = ctx.accounts.fee_owner.key();
-        let position_nft_mint = Some(ctx.accounts.position_nft_account.mint);
         secure_entrypoint!(
             ctx,
             user = user,
             fee_owner = fee_owner,
-            position_nft_mint = position_nft_mint,
             extra_authorities = &[],
             pool_state = &ctx.accounts.pool_state,
             body = instructions::increase_liquidity(

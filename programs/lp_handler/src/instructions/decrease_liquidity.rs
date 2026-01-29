@@ -14,6 +14,8 @@ use raydium_amm_v3::states::{
     AmmConfig, ObservationState, PersonalPositionState, PoolState, TickArrayState,
 };
 
+use crate::require_log;
+
 #[derive(Accounts)]
 #[instruction(
   liquidity:u128,
@@ -197,12 +199,24 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
     convert_to_usdc: bool,
 ) -> Result<()> {
     // 校验手续费比例，最大 100%（10000 bps）
-    require!(fee_percent <= 10_000, LpDepositError::InvalidFeePercent);
-    require!(slippage_bps <= 10_000, LpDepositError::InvalidSlippage);
-    require!(
+    require_log!(
+        fee_percent <= 10_000,
+        LpDepositError::InvalidFeePercent,
+        "fee_percent={}",
+        fee_percent
+    );
+    require_log!(
+        slippage_bps <= 10_000,
+        LpDepositError::InvalidSlippage,
+        "slippage_bps={}",
+        slippage_bps
+    );
+    require_log!(
         swap_to_token_mint == ctx.accounts.vault_0_mint.key()
             || swap_to_token_mint == ctx.accounts.vault_1_mint.key(),
-        LpDepositError::InvalidDepositMint
+        LpDepositError::InvalidDepositMint,
+        "swap_to_token_mint={}",
+        swap_to_token_mint
     );
 
     // -----------------------------------
@@ -266,7 +280,7 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
         .ok_or(LpDepositError::MathOverflow)?;
 
     // 所有情况：如果本次操作没有带来任何余额变化（两边增量都为 0），直接失败
-    require!(
+    require_log!(
         signer_token0_amount > 0 || signer_token1_amount > 0,
         LpDepositError::NoBalanceChange
     );
@@ -599,7 +613,7 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
     // token0 结算
     if net0 > 0 {
         if is_wsol_0 {
-            require!(net0 >= fee_due_0, LpDepositError::MathOverflow);
+            require_log!(net0 >= fee_due_0, LpDepositError::MathOverflow);
 
             // unwrap：close wSOL token account，把 lamports 退回 signer
             zap_common::unwrap_wsol_to_destination(
@@ -657,7 +671,7 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
     // token1 结算
     if net1 > 0 {
         if is_wsol_1 {
-            require!(net1 >= fee_due_1, LpDepositError::MathOverflow);
+            require_log!(net1 >= fee_due_1, LpDepositError::MathOverflow);
 
             zap_common::unwrap_wsol_to_destination(
                 ctx.accounts.signer.to_account_info(),

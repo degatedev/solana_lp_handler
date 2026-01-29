@@ -2,6 +2,7 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_pack::Pack;
 use raydium_amm_v3::states::PoolState;
 
+use crate::require_log;
 use crate::LpDepositError;
 
 #[derive(Clone)]
@@ -282,16 +283,6 @@ pub fn entry_check_and_snapshot<'info>(
         .count();
     if sep_cnt > 0 {
         require!(sep_cnt == 1, LpDepositError::SecuritySeparatorInvalid);
-        let sep_ai = remaining_accounts
-            .iter()
-            .find(|a| a.key() == crate::ID)
-            .ok_or(LpDepositError::SecuritySeparatorInvalid)?;
-        require!(sep_ai.executable, LpDepositError::SecuritySeparatorInvalid);
-        require!(
-            !sep_ai.is_writable,
-            LpDepositError::SecuritySeparatorInvalid
-        );
-        require!(!sep_ai.is_signer, LpDepositError::SecuritySeparatorInvalid);
     }
 
     // Pool 白名单（强制启用）：
@@ -326,11 +317,14 @@ pub fn entry_check_and_snapshot<'info>(
     for (idx, ai) in accounts.iter().enumerate() {
         // 可执行 program 白名单（按 key）
         if ai.executable {
-            require!(
-                crate::ALLOWED_EXECUTABLE_PROGRAMS
-                    .iter()
-                    .any(|k| k == &ai.key()),
-                LpDepositError::SecurityUnauthorizedExecutableProgram
+            let ok = crate::ALLOWED_EXECUTABLE_PROGRAMS
+                .iter()
+                .any(|k| k == &ai.key());
+            require_log!(
+                ok,
+                LpDepositError::SecurityUnauthorizedExecutableProgram,
+                "ai.key={}",
+                ai.key(),
             );
         }
 
@@ -378,7 +372,13 @@ pub fn entry_check_and_snapshot<'info>(
 
                 // authority 不是 fee_owner 且 token account 地址不是池子支持的 vault，则拒绝
                 if !is_fee_owner && !is_pool_support_ta {
-                    return err!(LpDepositError::SecurityNonWhitelistTokenAccount);
+                    require_log!(
+                        false,
+                        LpDepositError::SecurityNonWhitelistTokenAccount,
+                        "ta.mint={}, ta.owner={}",
+                        ta.mint,
+                        ta.owner,
+                    );
                 }
             }
         }
@@ -458,30 +458,40 @@ pub fn exit_check<'info>(
             }
             return err!(LpDepositError::SecurityTokenAccountCorrupted);
         };
-        require!(
+        require_log!(
             cur.owner == signer,
-            LpDepositError::SecurityTokenAuthorityChanged
+            LpDepositError::SecurityTokenAuthorityChanged,
+            "ai.key={}",
+            ai.key(),
         );
         if policy.forbid_delegate {
-            require!(
+            require_log!(
                 cur.delegate.is_none(),
-                LpDepositError::SecurityTokenDelegateNotAllowed
+                LpDepositError::SecurityTokenDelegateNotAllowed,
+                "ai.key={}",
+                ai.key(),
             );
         } else {
-            require!(
+            require_log!(
                 cur.delegate == b.delegate,
-                LpDepositError::SecurityTokenDelegateNotAllowed
+                LpDepositError::SecurityTokenDelegateNotAllowed,
+                "ai.key={}",
+                ai.key(),
             );
         }
         if policy.forbid_close_authority {
-            require!(
+            require_log!(
                 cur.close_authority.is_none(),
-                LpDepositError::SecurityTokenCloseAuthorityNotAllowed
+                LpDepositError::SecurityTokenCloseAuthorityNotAllowed,
+                "ai.key={}",
+                ai.key(),
             );
         } else {
-            require!(
+            require_log!(
                 cur.close_authority == b.close_authority,
-                LpDepositError::SecurityTokenCloseAuthorityNotAllowed
+                LpDepositError::SecurityTokenCloseAuthorityNotAllowed,
+                "ai.key={}",
+                ai.key(),
             );
         }
     }
@@ -495,14 +505,20 @@ pub fn exit_check<'info>(
             continue;
         }
         // 新初始化账户 owner(program id) 必须合规
-        require!(
+        require_log!(
             crate::ALLOWED_ACCOUNT_OWNERS.iter().any(|k| k == ai.owner),
-            LpDepositError::SecurityDisallowedAccountOwner
+            LpDepositError::SecurityDisallowedAccountOwner,
+            "ai.key={}，ai.owner={}",
+            ai.key(),
+            ai.owner,
         );
         if let Some(ta) = parse_token_account(ai) {
-            require!(
+            require_log!(
                 is_allowed_authority(&signer, &ta.owner, &ta.owner == &recipient),
-                LpDepositError::SecurityNewTokenAccountAuthorityInvalid
+                LpDepositError::SecurityNewTokenAccountAuthorityInvalid,
+                "ta.mint={}, ta.owner={}",
+                ta.mint,
+                ta.owner,
             );
         }
     }

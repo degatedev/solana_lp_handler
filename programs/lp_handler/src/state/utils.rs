@@ -3,6 +3,36 @@ use raydium_amm_v3::libraries::{liquidity_math, U256};
 
 use crate::LpDepositError;
 
+/// `require!` + 可选日志（不分配 heap）。
+///
+/// 说明：
+/// - 使用 `msg!` 输出（不会分配 heap；避免 format!/String）
+/// - 失败时会先打印，再返回 `anchor_lang::error!($error)`
+///
+/// 用法示例：
+/// - `require_log!(cond, LpDepositError::SecurityNonWhitelistTokenAccount, "bad token account");`
+/// - `require_log!(cond, LpDepositError::SecurityNonWhitelistTokenAccount, "bad token account",
+///       some_pubkey_expr,
+///       some_u64_expr,
+///       some_bool_expr,
+///   );`
+#[macro_export]
+macro_rules! require_log {
+    ($invariant:expr, $error:expr) => {{
+        if !($invariant) {
+            return Err(anchor_lang::error!($error));
+        }
+    }};
+
+    // format string + args (no heap): require_log!(cond, err, "a={} b={}", a, b)
+    ($invariant:expr, $error:expr, $fmt:literal, $($args:expr),+ $(,)?) => {{
+        if !($invariant) {
+            anchor_lang::prelude::msg!($fmt, $($args),+);
+            return Err(anchor_lang::error!($error));
+        }
+    }};
+}
+
 pub fn calc_min_amount_out(
     swap_amount: u64,
     input_is_token0: bool,

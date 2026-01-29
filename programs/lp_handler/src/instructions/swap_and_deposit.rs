@@ -34,7 +34,7 @@ pub struct SwapAndDeposit<'info> {
     #[account(address = raydium_amm_v3::ID)]
     pub raydium_clmm_program: Program<'info, AmmV3>,
 
-    /// CHECK: position NFT 的接收者（owner）。安全层会校验其 authority 关系
+    /// CHECK: position NFT 的接收者（owner）。安全层会校验其 authority 关系 必须定义到第二个账户，前端需要校验recipient 地址
     pub recipient: UncheckedAccount<'info>,
 
     /// 支付者 / 签名者

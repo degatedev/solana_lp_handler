@@ -33,7 +33,7 @@ pub struct DecreaseLiquidity<'info> {
     #[account(address = raydium_amm_v3::ID)]
     pub raydium_clmm_program: Program<'info, AmmV3>,
 
-    /// CHECK: withdraw 和 claim 的接收者
+    /// CHECK: withdraw 和 claim 的接收者 必须定义到第二个账户，前端需要校验recipient 地址
     #[account(mut)]
     pub recipient: UncheckedAccount<'info>,
 

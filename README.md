@@ -74,11 +74,14 @@
 
 #### `swap_and_deposit`
 
-1. User 调用 `swap_and_deposit(deposit_amount, deposit_mint, tick_lower, tick_upper, liquidity, slippage_bps)`
-2. 合约读取 `pool_state`，估算最优 swap 拆分（单边 -> 双边）
-3. 如需 swap：CPI 调用 Raydium `swap_v2`（通过 tick arrays/bitmap 等 remaining accounts）
+1. User 调用 `swap_and_deposit(amount_0_in, amount_1_in, return_mint, tick_lower, tick_upper, slippage_bps, swap_amount_in, swap_min_out, swap_input_is_token0)`
+2. 合约读取 `pool_state`，在链上决定本次执行 swap 的方向与数量（最多一次 swap）：
+  + **出区间**：允许“单边投入”，合约会覆盖链下 plan，把不需要的一侧全量换成需要的一侧
+  + **区间跨现价**：使用调用方传入的 `swap_amount_in/swap_min_out/swap_input_is_token0` 作为 swap 计划
+3. 如需 swap：CPI 调用 Raydium `swap_v2`（tick arrays/bitmap 由 remaining accounts 提供）
 4. CPI 调用 Raydium `open_position_with_token22_nft`，铸造 Position NFT（Token2022）并开仓
-5. 事件：`SwapExecutedEvent`（若发生 swap）、`IncreaseLiquidityEvent`
+5. 处理“剩余”：可选将剩余归一到 `return_mint`；若 `min_out == 0` 则按规则处理（非 wSOL → 转 fee；wSOL → 留给用户并在末尾 close/unwrap 成 SOL）
+6. 事件：`IncreaseLiquidityEvent`（包含 `return_amount_0/return_amount_1`）
 
 #### `decrease_liquidity`
 
@@ -98,13 +101,14 @@
 
 参数语义：
 
-* `deposit_amount: u64`：单边投入数量（最小单位）
-* `deposit_mint: Pubkey`：必须等于池子 token0 或 token1 的 mint
+* `amount_0_in: u64`：本次允许的 token0 最大投入量（最小单位）
+* `amount_1_in: u64`：本次允许的 token1 最大投入量（最小单位）
+* `return_mint: Option<Pubkey>`：可选；若提供则必须等于池子 token0 或 token1 的 mint，用于“把剩余尽量归一到某一边”
 * `tick_lower_index/tick_upper_index: i32`：仓位 tick 区间，要求 `lower < upper`
-* `liquidity: i128`（重要约定）
-  + **仅用于“最优 swap 量估算”**
-  + 实际开仓 CPI 时，合约固定传 `liquidity = 0` 给 Raydium（由 Raydium 根据 `amount_0_max/amount_1_max` 自动算实际 liquidity）
 * `slippage_bps: u16`：滑点（bps），该指令中要求 `< 5000`
+* `swap_amount_in: u64 / swap_min_out: u64 / swap_input_is_token0: bool`：
+  + 区间跨现价时，作为“链下 plan”输入（最多执行一次 swap）
+  + 出区间时，合约会覆盖该 plan，改为把不需要的一侧全量换成需要的一侧（仍会用 `slippage_bps` 计算 min_out）
 
 ### 4.2 账户模型与关键约束
 
@@ -122,28 +126,70 @@ Accounts： `SwapAndDeposit<'info>`
 
 ### 4.3 执行步骤
 
-1. 参数校验：tick 区间、mint 合法性、slippage 上限、Position NFT ATA 地址正确
-2. 读池状态：`tick_current`、`sqrt_price_x64`、`tick_spacing`
-3. 估算最优 swap：`calculate_optimal_swap_amount(...)` 得到 `swap_amount_in`
-4. 如需 swap：
-   - 用 `calc_min_amount_out` 计算 `min_out` （滑点保护）
-   - CPI 调用 Raydium `swap_v2`
+1. 参数校验：tick 区间、`return_mint` 合法性、slippage 上限
+2. 读池状态：`sqrt_price_x64`、`tick_spacing`，判断是否“出区间”
+3. 决定本次执行 swap（最多一次）：
+  + 出区间：合约覆盖 plan，执行“单边转双边”的全量 swap
+  + 区间跨现价：使用调用方传入的 plan 参数
+4. 如需 swap：计算 `min_out` 并 CPI 调用 Raydium `swap_v2`
+5. 计算 `amount_0_max/amount_1_max` 作为开仓上限（swap 后余额 + 输入预算）
+6. CPI 调用 Raydium `open_position_with_token22_nft`
+7. 处理剩余并发事件：`swap_back_remaining_and_emit_increase_event`
+  + `return_mint=None`：两边剩余都保留在用户 token account
+  + `return_mint=Some(token0/token1)`：尽量把另一边剩余兑换为目标币种；若 `min_out == 0`：
+    - 非 wSOL：该侧剩余转给 `fee_token*_account`
+    - wSOL：不转 fee，留给用户，并在末尾 close/unwrap 成 SOL
+8. 发 `IncreaseLiquidityEvent`（新增字段 `return_amount_0/return_amount_1`）
 
-   - 通过余额差计算实际产出，发 `SwapExecutedEvent`
+#### `return_amount_0/return_amount_1` 口径（case-by-case）
 
-5. 计算开仓 `amount_0_max/amount_1_max`（输入剩余 + swap 得到的对侧增量）
-6. CPI 调用 Raydium `open_position_with_token22_nft`（合约固定传 `liquidity=0`）
-7. 发 `IncreaseLiquidityEvent`
+在 `swap_back_remaining_and_emit_increase_event` 中：
 
-#### 资金去向与“保留策略”
+* `leftover_0 = amount_0_max - spent_0`
+* `leftover_1 = amount_1_max - spent_1`
+* `return_amount_0/return_amount_1` 是事件里记录的“最终留给用户的剩余”口径（留在用户的 `signer_token0/1_account` 里；若 mint 是 wSOL，后面会 close/unwrap 成 SOL）。
 
-`swap_and_deposit` 的资金使用方式不是“把两边都换得刚刚好再全部花光”，而是采用 **一边保留、一边尽量用完** 的策略（由实现逻辑直接决定）：
+Case 1： `return_mint == None` （不要求把剩余统一换成某一边）
 
-* **原始投入币种会保留一部分**：合约会计算 `swap_amount_min`，然后用 `deposit_amount - swap_amount_min` 作为该币种的 `amount_*_max`，也就是说 **不会把投入的那一边换光**。
-* **swap 得到的对侧币种会“全量作为可用上限”提供给开仓**：对侧币种的 `amount_*_max` 直接取 swap 后的余额增量（`balance_after - balance_before`），等价于把 **本次 swap 得到的币全部作为最大可用量** 交给 Raydium 开仓 CPI。
-  + 说明：`open_position_with_token22_nft` 接收的是 `amount_0_max/amount_1_max`（上限），Raydium 会按当时池子价格与区间计算实际消耗；如果因为舍入/价格变化导致没有用完某一边，上限中未消耗的部分会留在用户 ATA。
+* `return_amount_0 = leftover_0`
+* `return_amount_1 = leftover_1`
 
-源码位置（便于核对）： `programs/lp_handler/src/instructions/swap_and_deposit.rs` 中 `amount_0_max/amount_1_max` 的计算处。
+Case 2： `return_mint == token0` （希望把 token1 剩余换成 token0）
+
+* **2.1** `leftover_1 == 0`
+  + `return_amount_0 = leftover_0`
+  + `return_amount_1 = 0`
+* **2.2** `leftover_1 > 0` 且 `min_out > 0`（执行 swap token1→token0）
+  + `return_amount_0 = leftover_0 + out_from_swap`
+  + `return_amount_1 = 0`
+* **2.3** `leftover_1 > 0` 且 `min_out == 0`（不 swap）
+  + **2.3.a** token1 不是 wSOL：`leftover_1` 转给 fee
+    - `return_amount_0 = leftover_0`
+    - `return_amount_1 = 0`
+  + **2.3.b** token1 是 wSOL：`leftover_1` 不转 fee，留给用户（后面 close→SOL）
+    - `return_amount_0 = leftover_0`
+    - `return_amount_1 = leftover_1`
+
+Case 3： `return_mint == token1` （希望把 token0 剩余换成 token1）
+
+* **3.1** `leftover_0 == 0`
+  + `return_amount_1 = leftover_1`
+  + `return_amount_0 = 0`
+* **3.2** `leftover_0 > 0` 且 `min_out > 0`（执行 swap token0→token1）
+  + `return_amount_1 = leftover_1 + out_from_swap`
+  + `return_amount_0 = 0`
+* **3.3** `leftover_0 > 0` 且 `min_out == 0`（不 swap）
+  + **3.3.a** token0 不是 wSOL：`leftover_0` 转给 fee
+    - `return_amount_1 = leftover_1`
+    - `return_amount_0 = 0`
+  + **3.3.b** token0 是 wSOL：`leftover_0` 不转 fee，留给用户（后面 close→SOL）
+    - `return_amount_1 = leftover_1`
+    - `return_amount_0 = leftover_0`
+
+额外说明（wSOL & rent）：
+
+* `close_account` 会把 token account 的 lamports 全部转走，因此 **rent 也会一起转走**。
+* 事件里的 `return_amount_*` 记录的是 token `amount` 口径（不含 rent）；实际钱包收到的 SOL 会比该数值多一点点（包含 rent）。
 
 ### 4.4 remainingAccounts 规则
 
@@ -181,7 +227,7 @@ Accounts： `SwapAndDeposit<'info>`
   + `=0`：典型 claim（只领奖励；principal 视为 0）
 * `mint_amount_0/mint_amount_1: u64`：传给 Raydium `decrease_liquidity_v2` 的参数（测试里多为 0）
 * `swap_to_token_mint: Pubkey`：目标 mint（仅在 `convert_to_usdc=true` 时生效），必须是池子 token0 或 token1
-* `slippage_bps: u16`：`<= 10000`
+* `slippage_bps: u16`：`<= 5000`
 * `fee_percent: u16`：抽成比例（bps），`<= 10000`
 * `convert_to_usdc: bool`：实现语义是“兑换到目标币种”（名称偏业务）
 
@@ -191,7 +237,7 @@ Accounts： `DecreaseLiquidity<'info>`
 
 关键约束：
 
-* `fee_owner` 必须命中 `FEE_OWNERS` 白名单（运行时校验）
+* `fee_owner` 必须命中 `security_config` PDA 中的 `fee_owners` 白名单（运行时校验）
 * `fee_token0_account/fee_token1_account` 必须是 fee_owner 对应 mint 的 **ATA**
   + 并且会校验 `mint`、`owner`
   + ATA 推导时 token_program 使用 vault mint 账户的 `owner`（兼容 SPL Token / Token2022）
@@ -236,10 +282,10 @@ Accounts： `DecreaseLiquidity<'info>`
 当 `convert_to_usdc=true` ：
 
 * `swap_to_token_mint` 决定目标边（token0 或 token1）
-* 兑换流程被拆成两段：
-  1. **先把 reward 的对侧部分换成目标币种**（便于“在目标币种里精确扣费”）
-  2. 在目标币种里对 reward 抽成并 transfer 到 fee ATA
-  3. **再把 principal 的对侧部分换成目标币种**
+* 兑换流程为“合并 swap + 近似拆分”：
+  1. 将对侧 token 的本次增量（principal + reward）合并成一次 `swap_v2` 兑换为目标币种
+  2. 用比例近似把 swap 输出拆分为 `reward_out_est / principal_out_est`
+  3. 手续费仍然只按 reward 口径计提：`fee = (reward_direct + reward_out_est) * fee_percent`
 * `DecreaseLiquidityEvent` 在该模式下会把 principal/reward/fee **集中体现在目标币种一侧**，另一侧置 0
 
 当 `convert_to_usdc=false` ：
@@ -252,8 +298,8 @@ Accounts： `DecreaseLiquidity<'info>`
 
 事件定义见 `programs/lp_handler/src/state/events.rs` ：
 
-* `SwapExecutedEvent`：swap 输入/输出/最小输出、输入边、滑点、pool 等
 * `IncreaseLiquidityEvent`：加仓 amount0/amount1、tick 区间、position nft mint 等
+  + `return_amount_0/return_amount_1`：两侧最终退回给用户的剩余（最小单位；wSOL 会在函数末尾 close/unwrap 成 SOL，实际到账会额外包含 rent）
 * `DecreaseLiquidityEvent`：principal、reward、integrator_fee（按“兑换后口径”或“双币口径”输出）
 
 ---
@@ -266,7 +312,8 @@ Accounts： `DecreaseLiquidity<'info>`
   + swap_and_deposit：remaining 超过 32 或 owner 不正确
   + decrease_liquidity：找不到分隔符或 swap_remaining 校验失败
 * `InvalidPositionNftAccount`：Position NFT ATA 地址推导不匹配
-* `InvalidDepositMint`：`deposit_mint`/`swap_to_token_mint` 不是池子 token0/token1
+* `InvalidDepositMint`：`return_mint`（若提供）/ `swap_to_token_mint` 不是池子 token0/token1
+  + swap_and_deposit：`return_mint` 不合法（不是池子 token0/token1）时也会触发
 * `InvalidFeeOwner`/`InvalidFeeTokenAccount`：fee 白名单或 fee ATA 校验失败
 * `InvalidTickRange`：tick 区间非法
 * `InvalidSlippage`/`InvalidFeePercent`：参数越界

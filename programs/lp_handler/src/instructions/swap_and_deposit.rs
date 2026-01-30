@@ -228,7 +228,7 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
     )?;
 
     let position_nft_mint = ctx.accounts.position_nft_mint.key();
-    let _return_amount = zap_common::swap_back_remaining_and_emit_increase_event(
+    zap_common::swap_back_remaining_and_emit_increase_event(
         &mut *ctx.accounts,
         amount_0_in,
         amount_1_in,

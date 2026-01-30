@@ -206,7 +206,7 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
         fee_percent
     );
     require_log!(
-        slippage_bps <= 10_000,
+        slippage_bps <= 5_000,
         LpDepositError::InvalidSlippage,
         "slippage_bps={}",
         slippage_bps

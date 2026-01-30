@@ -395,7 +395,7 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
     amount_1_max: u64,
     swap_remaining: &'info [AccountInfo<'info>],
     position_nft_mint: Pubkey,
-) -> Result<u64> {
+) -> Result<(u64, u64)> {
     accounts.signer_token0_account().reload()?;
     accounts.signer_token1_account().reload()?;
 
@@ -416,7 +416,9 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
     // 可选：把非 return_mint 的剩余统一兑换成 return_mint
     let vault0 = accounts.vault_0_mint().key();
     let vault1 = accounts.vault_1_mint().key();
-    let mut return_amount: u64 = 0;
+    // 默认：不指定 return_mint 时，两个币种的剩余都“原样退回”（留在用户 token account）
+    let mut return_amount_0: u64 = leftover_0;
+    let mut return_amount_1: u64 = leftover_1;
 
     if let Some(return_mint) = return_mint {
         require!(
@@ -427,6 +429,7 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
         if return_mint == vault0 {
             // token0 作为返回币种
             let mut out_from_swap = 0u64;
+            let mut kept_other = false;
             if leftover_1 > 0 {
                 let before0 = accounts.signer_token0_account().amount;
                 let sqrt_price_x64 = {
@@ -479,13 +482,17 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
                             leftover_1,
                         )?;
                         accounts.signer_token1_account().reload()?;
+                    } else {
+                        kept_other = true;
                     }
                 }
             }
-            return_amount = leftover_0.checked_add(out_from_swap).unwrap_or(0);
+            return_amount_0 = leftover_0.checked_add(out_from_swap).unwrap_or(0);
+            return_amount_1 = if kept_other { leftover_1 } else { 0 };
         } else {
             // token1 作为返回币种
             let mut out_from_swap = 0u64;
+            let mut kept_other = false;
             if leftover_0 > 0 {
                 let before1 = accounts.signer_token1_account().amount;
                 let sqrt_price_x64 = {
@@ -538,10 +545,13 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
                             leftover_0,
                         )?;
                         accounts.signer_token0_account().reload()?;
+                    } else {
+                        kept_other = true;
                     }
                 }
             }
-            return_amount = leftover_1.checked_add(out_from_swap).unwrap_or(0);
+            return_amount_1 = leftover_1.checked_add(out_from_swap).unwrap_or(0);
+            return_amount_0 = if kept_other { leftover_0 } else { 0 };
         }
     }
 
@@ -557,8 +567,8 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
         liquidity: computed_liquidity,
         amount_0_in,
         amount_1_in,
-        return_mint,
-        return_amount,
+        return_amount_0,
+        return_amount_1,
     });
 
     // 这里必须先把 AccountInfo 拷贝出来，避免同时出现 &self / &mut self 的借用冲突
@@ -593,7 +603,7 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
         )?;
     }
 
-    Ok(return_amount)
+    Ok((return_amount_0, return_amount_1))
 }
 
 /// 公开的 swap_v2 工具：仅依赖 AccountInfo，不依赖 `ZapCommonAccounts`。

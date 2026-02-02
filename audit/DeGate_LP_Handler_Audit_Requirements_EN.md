@@ -51,7 +51,7 @@ The smart contract employs an **"Entry Snapshot + Exit Reconciliation"** securit
    - Before transaction completion, the system performs comprehensive reconciliation
    - Validates that all asset movements comply with whitelist constraints
    - Ensures no unauthorized approvals have been created
-   - Verifies LP NFT positions remain with user accounts without new delegations
+   - Verifies LP NFT positions can only flow between signer and recipient accounts, with no new delegations
    - Rejects the transaction if any security invariant is violated
 
 3. **Security Guarantee:**
@@ -80,7 +80,7 @@ Assets are permitted to flow **ONLY** between the following four categories of w
 |------------|-------------|------------------|
 | **2.1** | LP Pool Token1 | Can ONLY flow between whitelisted accounts; token mint read from on-chain pool data |
 | **2.2** | LP Pool Token2 | Can ONLY flow between whitelisted accounts; token mint read from on-chain pool data |
-| **2.3** | User LP Position NFT (Token-2022) | MUST remain in user account; NO new approvals/delegations permitted |
+| **2.3** | User LP Position NFT (Token-2022) | Can ONLY flow between signer and recipient accounts; NO new approvals/delegations permitted |
 | **2.4** | Reward Tokens | Can ONLY flow between whitelisted accounts; added based on business requirements |
 
 ### 4.3 Security Invariant
@@ -137,8 +137,9 @@ The audit should specifically verify:
    - Are there any code paths that skip the exit reconciliation?
 
 6. **Token-2022 Specific Concerns**
-   - Are Token-2022 extension features (transfer hooks, confidential transfers, etc.) handled correctly?
-   - Can Token-2022 specific features be exploited to bypass security checks?
+   - Token-2022 extension features (transfer hooks, confidential transfers, etc.) are NOT checked by this security model; security is controlled through pool whitelist mechanism
+   - Account approval/delegation checks ARE implemented and enforced
+   - Verify that the approval/delegation validation logic is comprehensive and cannot be bypassed
 
 ---
 
@@ -238,7 +239,7 @@ The DeGate development team will be available throughout the audit period to:
 │  │   EXIT       │  ◄── Validate Against Snapshot:                   │
 │  │   RECONCILE  │      ✓ Assets only in whitelist accounts          │
 │  │              │      ✓ No new approvals on LP NFT                 │
-│  │              │      ✓ LP NFT still with user                     │
+│  │              │      ✓ LP NFT only between signer/recipient       │
 │  │              │      ✗ REJECT if any violation                    │
 │  └──────────────┘                                                   │
 │                                                                      │

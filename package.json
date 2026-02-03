@@ -1,0 +1,30 @@
+{
+  "license": "ISC",
+  "scripts": {
+    "lint:fix": "prettier */*.js \"*/**/*{.js,.ts}\" -w",
+    "lint": "prettier */*.js \"*/**/*{.js,.ts}\" --check",
+    "build": "anchor build",
+    "cli": "ts-node scripts/cli.ts"
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "0.31.1",
+    "@raydium-io/raydium-sdk-v2": "^0.2.30-alpha",
+    "@solana/spl-token": "^0.4.14",
+    "@solana/web3.js": "^1.98.4",
+    "decimal.js": "^10.6.0",
+    "dotenv": "^17.2.3",
+    "enquirer": "^2.4.1",
+    "ts-node": "^10.9.2"
+  },
+  "devDependencies": {
+    "@types/bn.js": "^5.1.0",
+    "@types/chai": "^4.3.0",
+    "@types/jest": "^30.0.0",
+    "babel-jest": "^30.2.0",
+    "chai": "^4.3.4",
+    "jest": "^30.2.0",
+    "prettier": "^2.6.2",
+    "ts-jest": "^29.4.5",
+    "typescript": "^5.7.3"
+  }
+}

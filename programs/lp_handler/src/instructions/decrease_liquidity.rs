@@ -157,8 +157,14 @@ pub struct DecreaseLiquidity<'info> {
     pub vault_1_mint: Box<InterfaceAccount<'info, Mint>>,
 
     /// CHECK: position NFT 的 token account（通常是 ATA；用于验证/关闭 position NFT）
-    #[account(mut)]
-    pub position_nft_account: UncheckedAccount<'info>,
+    /// Position NFT 的 token account，必须持有正确的 NFT 并由 signer 拥有
+    #[account(
+        mut,
+        constraint = position_nft_account.mint == personal_position.nft_mint,
+        constraint = position_nft_account.amount == 1,
+        token::authority = signer
+    )]
+    pub position_nft_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
     /// CHECK: `protocol_position` 已废弃，仅为兼容保留
     pub protocol_position: UncheckedAccount<'info>,
@@ -285,8 +291,33 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
         LpDepositError::NoBalanceChange
     );
 
-    let reward_gross_0 = signer_token0_amount.saturating_sub(principal_expected_0);
-    let reward_gross_1 = signer_token1_amount.saturating_sub(principal_expected_1);
+    // LPH-004: 避免用 saturating_sub 静默吞掉 "actual < principal" 的边界状态。
+    // 语义保持不变：reward 只取正向增量，不对“本金缺口/负收益”计提手续费；
+    // 但我们显式记录 WARN，便于排查与监控。
+    let reward_gross_0 = if signer_token0_amount >= principal_expected_0 {
+        signer_token0_amount
+            .checked_sub(principal_expected_0)
+            .ok_or(LpDepositError::MathOverflow)?
+    } else {
+        msg!(
+            "WARN: token0 actual_delta < principal_expected (actual={}, principal={})",
+            signer_token0_amount,
+            principal_expected_0
+        );
+        0
+    };
+    let reward_gross_1 = if signer_token1_amount >= principal_expected_1 {
+        signer_token1_amount
+            .checked_sub(principal_expected_1)
+            .ok_or(LpDepositError::MathOverflow)?
+    } else {
+        msg!(
+            "WARN: token1 actual_delta < principal_expected (actual={}, principal={})",
+            signer_token1_amount,
+            principal_expected_1
+        );
+        0
+    };
 
     // wSOL 手续费要求：
     // - 如果手续费币种是 wSOL(native mint)，则手续费必须以 SOL(lamports) 形式转给 fee_owner。
@@ -307,7 +338,14 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
                 reward_gross_1,
                 signer_token1_amount
                     .checked_sub(reward_gross_1)
-                    .unwrap_or(0),
+                    .unwrap_or_else(|| {
+                        msg!(
+                            "WARN: principal_other_in underflow (token1): total_delta={}, reward_gross={}",
+                            signer_token1_amount,
+                            reward_gross_1
+                        );
+                        0
+                    }),
                 reward_gross_0,
             )
         } else {
@@ -316,7 +354,14 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
                 reward_gross_0,
                 signer_token0_amount
                     .checked_sub(reward_gross_0)
-                    .unwrap_or(0),
+                    .unwrap_or_else(|| {
+                        msg!(
+                            "WARN: principal_other_in underflow (token0): total_delta={}, reward_gross={}",
+                            signer_token0_amount,
+                            reward_gross_0
+                        );
+                        0
+                    }),
                 reward_gross_1,
             )
         };
@@ -351,9 +396,19 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
 
             // dust 处理：
             // - 合并 swap 后，若同时包含 principal，则不能把输入直接转给 fee（会误伤本金）
-            // - 但在“纯领取奖励”（principal_other_in==0）场景下，可以保留原逻辑：当 min_out==0 时直接把 reward_other_in 转给 fee
-            if principal_other_in == 0 && swap_other_amount_threshold == 0 {
-                msg!("skip reward swap (claim-only dust): amount_out_min=0, transfer input to fee");
+            // - 但在“纯领取奖励”（principal_other_in==0）场景下，可以保留原逻辑：当 swap_other_amount_threshold 小于MIN_USDC_SWAP_AMOUNT 时直接把 reward_other_in 转给 fee
+            let is_usdc = swap_to_token_mint == crate::consts::USDC_MIN;
+
+            let min = if is_usdc {
+                swap_other_amount_threshold
+            } else {
+                total_other_in
+            };
+
+            if principal_other_in == 0 && min < crate::consts::MIN_USDC_SWAP_AMOUNT {
+                msg!(
+                    "skip reward swap (claim-only dust): below MIN_USDC_SWAP_AMOUNT, transfer input to fee"
+                );
                 zap_common::transfer_fee(
                     &ctx.accounts.signer,
                     &ctx.accounts.fee_owner,
@@ -407,7 +462,24 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
                 .checked_mul(reward_other_in as u128)
                 .ok_or(LpDepositError::MathOverflow)?;
             let den = total_other_in as u128;
-            (num / den) as u64
+            // LPH-008: 避免整数除法向下截断的系统性偏差；采用“四舍五入到最近整数”。
+            // 同时避免 u128 -> u64 的 `as` 静默截断：改用 try_into() 显式溢出报错。
+            let quotient = num.checked_div(den).ok_or(LpDepositError::MathOverflow)?;
+            let remainder = num.checked_rem(den).ok_or(LpDepositError::MathOverflow)?;
+            let rounded = if remainder
+                .checked_mul(2)
+                .ok_or(LpDepositError::MathOverflow)?
+                >= den
+            {
+                quotient
+                    .checked_add(1)
+                    .ok_or(LpDepositError::MathOverflow)?
+            } else {
+                quotient
+            };
+            rounded
+                .try_into()
+                .map_err(|_| error!(LpDepositError::MathOverflow))?
         };
         let principal_out_in_target_est = total_out_in_target
             .checked_sub(reward_out_in_target_est)
@@ -596,13 +668,27 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
         .signer_token0_account
         .amount
         .checked_sub(signer_token0_balance_before)
-        .unwrap_or(0);
+        .unwrap_or_else(|| {
+            msg!(
+                "WARN: net0 underflow: after={}, before={}",
+                ctx.accounts.signer_token0_account.amount,
+                signer_token0_balance_before
+            );
+            0
+        });
     let net1 = ctx
         .accounts
         .signer_token1_account
         .amount
         .checked_sub(signer_token1_balance_before)
-        .unwrap_or(0);
+        .unwrap_or_else(|| {
+            msg!(
+                "WARN: net1 underflow: after={}, before={}",
+                ctx.accounts.signer_token1_account.amount,
+                signer_token1_balance_before
+            );
+            0
+        });
 
     let recipient_is_signer = ctx.accounts.recipient.key() == ctx.accounts.signer.key();
     let is_wsol_0 =

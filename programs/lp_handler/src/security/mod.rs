@@ -75,8 +75,9 @@ pub struct SecuritySnapshot<'info> {
     /// - ctx.accounts 中 authority==signer 的 token accounts
     /// - remaining_accounts 中 authority==signer 的 token accounts
     pub signer_token_accounts: Vec<SignerTokenAccountBefore<'info>>,
-    /// 入口时未初始化(system owner + data_len=0)的账户索引，用于出口判断"新初始化账户"
-    pub uninitialized_indices: Vec<usize>,
+    /// 入口时未初始化(system owner + data_len=0)的账户索引 + key，用于出口判断"新初始化账户"，
+    /// 同时在 exit 做 key 一致性校验（LPH-005 defense-in-depth）。
+    pub uninitialized_indices: Vec<(usize, Pubkey)>,
 }
 
 fn is_uninitialized_account(ai: &AccountInfo) -> bool {
@@ -164,10 +165,14 @@ fn security_config_pools_len(data: &[u8]) -> Result<usize> {
 }
 
 fn security_config_contains(data: &[u8], n: usize, key: &Pubkey) -> bool {
-    let start = 8 + 32 + 4;
+    let start: usize = 8 + 32 + 4;
     let kb = key.as_ref();
     for i in 0..n {
-        let off = start + i * 32;
+        // LPH-017: 防御性使用 checked_*，避免未来常量调整导致潜在溢出。
+        let off = match i.checked_mul(32).and_then(|x| start.checked_add(x)) {
+            Some(v) => v,
+            None => return false,
+        };
         if data[off..off + 32] == *kb {
             return true;
         }
@@ -220,12 +225,25 @@ fn security_config_fee_owner_contains(
     fee_n: usize,
     key: &Pubkey,
 ) -> bool {
-    let pools_start = 8 + 32 + 4;
-    let pools_end = pools_start + pools_n * 32;
-    let fee_start = pools_end + 4;
+    let pools_start: usize = 8 + 32 + 4;
+    // LPH-017: 防御性使用 checked_*，避免未来常量调整导致潜在溢出。
+    let pools_end = match pools_n
+        .checked_mul(32)
+        .and_then(|x| pools_start.checked_add(x))
+    {
+        Some(v) => v,
+        None => return false,
+    };
+    let fee_start = match pools_end.checked_add(4) {
+        Some(v) => v,
+        None => return false,
+    };
     let kb = key.as_ref();
     for i in 0..fee_n {
-        let off = fee_start + i * 32;
+        let off = match i.checked_mul(32).and_then(|x| fee_start.checked_add(x)) {
+            Some(v) => v,
+            None => return false,
+        };
         if data[off..off + 32] == *kb {
             return true;
         }
@@ -272,9 +290,15 @@ pub fn entry_check_and_snapshot<'info>(
     pool_state: &AccountLoader<'info, PoolState>,
     signer: Pubkey,
     recipient: Pubkey,
-    _policy: &SecurityPolicy,
+    fee_owner: Pubkey,
+    policy: &SecurityPolicy,
 ) -> Result<SecuritySnapshot<'info>> {
     let pool_state_key = pool_state.key();
+
+    // LPH-007：recipient 参数必须是本次指令真实提供的账户之一（ctx.accounts 或 remaining_accounts）。
+    // 否则任意 recipient pubkey 会扩大安全层允许的 token authority 集合。
+    let recipient_exists = accounts.iter().any(|a| a.key() == recipient);
+    require!(recipient_exists, LpDepositError::RecipientNotInAccounts);
 
     // remaining_accounts 分隔符（crate::ID）约束：若出现，则必须唯一、只读
     let sep_cnt = remaining_accounts
@@ -305,13 +329,21 @@ pub fn entry_check_and_snapshot<'info>(
             security_config_contains(&data, pools_n, &pool_state_key),
             LpDepositError::SecurityPoolNotAllowed
         );
+
+        // LPH-001：链上强制校验 fee_owner 参数必须在 fee_owners 白名单中。
+        // 否则攻击者可将 fee_owner 指向任意地址并重定向协议手续费。
+        require!(
+            fee_owners_n != 0
+                && security_config_fee_owner_contains(&data, pools_n, fee_owners_n, &fee_owner),
+            LpDepositError::InvalidFeeOwner
+        );
     }
 
     // 轻量快照：
     // - signer 的 token accounts（用于出口对账 authority/delegate/close_authority）
     // - 入口时未初始化账户索引（用于出口判断“新初始化账户”）
     let mut signer_token_accounts: Vec<SignerTokenAccountBefore<'info>> = Vec::new();
-    let mut uninitialized_indices: Vec<usize> = Vec::new();
+    let mut uninitialized_indices: Vec<(usize, Pubkey)> = Vec::new();
     let pool_state_data = pool_state.load()?;
 
     for (idx, ai) in accounts.iter().enumerate() {
@@ -329,10 +361,29 @@ pub fn entry_check_and_snapshot<'info>(
         }
 
         if is_uninitialized_account(ai) {
-            uninitialized_indices.push(idx);
+            // 记录 index + key，exit 阶段可校验“同一个位置的账户是否仍为同一个 key”
+            uninitialized_indices.push((idx, ai.key()));
         }
         if let Some(ta) = parse_token_account(ai) {
             if ta.owner == signer {
+                // LPH-003：入口阶段拒绝 signer token accounts 上已有的 delegate / close_authority，
+                // 避免“跑到 exit 才失败”，并防止未来策略变更导致旧 delegate 残留的风险。
+                if policy.forbid_delegate {
+                    require_log!(
+                        ta.delegate.is_none(),
+                        LpDepositError::SecurityTokenDelegateNotAllowed,
+                        "entry: signer token account has existing delegate, ai.key={}",
+                        ai.key(),
+                    );
+                }
+                if policy.forbid_close_authority {
+                    require_log!(
+                        ta.close_authority.is_none(),
+                        LpDepositError::SecurityTokenCloseAuthorityNotAllowed,
+                        "entry: signer token account has existing close_authority, ai.key={}",
+                        ai.key(),
+                    );
+                }
                 let token_program = ta.token_program;
                 let is_wsol_ata = ta.mint == anchor_spl::token::spl_token::native_mint::ID
                     && is_user_wsol_ata_address(&signer, &token_program, &ai.key());
@@ -389,6 +440,23 @@ pub fn entry_check_and_snapshot<'info>(
     for ai in remaining_accounts.iter() {
         if let Some(ta) = parse_token_account(ai) {
             if ta.owner == signer {
+                // 与 ctx.accounts 扫描保持一致：入口拒绝已有 delegate/close_authority。
+                if policy.forbid_delegate {
+                    require_log!(
+                        ta.delegate.is_none(),
+                        LpDepositError::SecurityTokenDelegateNotAllowed,
+                        "entry: remaining signer token account has existing delegate, ai.key={}",
+                        ai.key(),
+                    );
+                }
+                if policy.forbid_close_authority {
+                    require_log!(
+                        ta.close_authority.is_none(),
+                        LpDepositError::SecurityTokenCloseAuthorityNotAllowed,
+                        "entry: remaining signer token account has existing close_authority, ai.key={}",
+                        ai.key(),
+                    );
+                }
                 let token_program = ta.token_program;
                 let is_wsol_ata = ta.mint == anchor_spl::token::spl_token::native_mint::ID
                     && is_user_wsol_ata_address(&signer, &token_program, &ai.key());
@@ -497,10 +565,16 @@ pub fn exit_check<'info>(
     }
 
     // 3) 新初始化账户 owner 校验 + 新初始化 token account authority 校验
-    for idx in before.uninitialized_indices.iter().copied() {
+    for (idx, original_key) in before.uninitialized_indices.iter().copied() {
         let ai = accounts
             .get(idx)
             .ok_or(LpDepositError::SecurityAccountSetChanged)?;
+        // LPH-005：防御纵深——确保 exit 取到的仍是 entry 时记录的同一账户（key 不变）。
+        require_keys_eq!(
+            ai.key(),
+            original_key,
+            LpDepositError::SecurityAccountSetChanged
+        );
         if is_uninitialized_account(ai) {
             continue;
         }

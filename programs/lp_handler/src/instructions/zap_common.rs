@@ -405,13 +405,41 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
     // CPI 实际花费（<= amount_max）
     let spent_0 = balance_0_pre_cpi
         .checked_sub(balance_0_after_cpi)
-        .unwrap_or(0);
+        .unwrap_or_else(|| {
+            msg!(
+                "WARN: spent_0 underflow: pre={}, after={}",
+                balance_0_pre_cpi,
+                balance_0_after_cpi
+            );
+            0
+        });
     let spent_1 = balance_1_pre_cpi
         .checked_sub(balance_1_after_cpi)
-        .unwrap_or(0);
+        .unwrap_or_else(|| {
+            msg!(
+                "WARN: spent_1 underflow: pre={}, after={}",
+                balance_1_pre_cpi,
+                balance_1_after_cpi
+            );
+            0
+        });
 
-    let leftover_0 = amount_0_max.checked_sub(spent_0).unwrap_or(0);
-    let leftover_1 = amount_1_max.checked_sub(spent_1).unwrap_or(0);
+    let leftover_0 = amount_0_max.checked_sub(spent_0).unwrap_or_else(|| {
+        msg!(
+            "WARN: leftover_0 underflow: max={}, spent={}",
+            amount_0_max,
+            spent_0
+        );
+        0
+    });
+    let leftover_1 = amount_1_max.checked_sub(spent_1).unwrap_or_else(|| {
+        msg!(
+            "WARN: leftover_1 underflow: max={}, spent={}",
+            amount_1_max,
+            spent_1
+        );
+        0
+    });
 
     // 可选：把非 return_mint 的剩余统一兑换成 return_mint
     let vault0 = accounts.vault_0_mint().key();
@@ -425,6 +453,8 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
             return_mint == vault0 || return_mint == vault1,
             LpDepositError::InvalidDepositMint
         );
+
+        let vault0_is_usdc = vault0 == crate::consts::USDC_MIN;
 
         if return_mint == vault0 {
             // token0 作为返回币种
@@ -443,7 +473,9 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
                     slippage_bps,
                     accounts.amm_config().trade_fee_rate,
                 )?;
-                if min_out > 0 {
+                let min = if vault0_is_usdc { min_out } else { leftover_1 };
+                // 大于0.001 usdc 才swap，避免 swap 过小失败
+                if min >= crate::consts::MIN_USDC_SWAP_AMOUNT {
                     swap_v2_common(
                         accounts,
                         leftover_1,
@@ -457,7 +489,14 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
                         .signer_token0_account()
                         .amount
                         .checked_sub(before0)
-                        .unwrap_or(0);
+                        .unwrap_or_else(|| {
+                            msg!(
+                                "WARN: out_from_swap underflow (to token0): after={}, before={}",
+                                accounts.signer_token0_account().amount,
+                                before0
+                            );
+                            0
+                        });
                 } else {
                     // 如果 min_out <= 0，则不进行 swap，把剩余的 token1 直接转账给 fee
                     // 如果剩余 mint 是 wSOL(native mint)，则不转给 fee（保持留在用户侧，函数末尾会统一 close/unwrap 成 SOL）
@@ -487,7 +526,14 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
                     }
                 }
             }
-            return_amount_0 = leftover_0.checked_add(out_from_swap).unwrap_or(0);
+            return_amount_0 = leftover_0.checked_add(out_from_swap).unwrap_or_else(|| {
+                msg!(
+                    "WARN: return_amount_0 overflow: leftover_0={}, out_from_swap={}",
+                    leftover_0,
+                    out_from_swap
+                );
+                0
+            });
             return_amount_1 = if kept_other { leftover_1 } else { 0 };
         } else {
             // token1 作为返回币种
@@ -506,7 +552,8 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
                     slippage_bps,
                     accounts.amm_config().trade_fee_rate,
                 )?;
-                if min_out > 0 {
+                let min = if vault0_is_usdc { leftover_0 } else { min_out };
+                if min >= crate::consts::MIN_USDC_SWAP_AMOUNT {
                     swap_v2_common(
                         accounts,
                         leftover_0,
@@ -520,7 +567,14 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
                         .signer_token1_account()
                         .amount
                         .checked_sub(before1)
-                        .unwrap_or(0);
+                        .unwrap_or_else(|| {
+                            msg!(
+                                "WARN: out_from_swap underflow (to token1): after={}, before={}",
+                                accounts.signer_token1_account().amount,
+                                before1
+                            );
+                            0
+                        });
                 } else {
                     // 如果 min_out <= 0，则不进行 swap，把剩余的 token0 直接转账给 fee
                     // 如果剩余 mint 是 wSOL(native mint)，则不转给 fee（保持留在用户侧，函数末尾会统一 close/unwrap 成 SOL）
@@ -550,7 +604,14 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
                     }
                 }
             }
-            return_amount_1 = leftover_1.checked_add(out_from_swap).unwrap_or(0);
+            return_amount_1 = leftover_1.checked_add(out_from_swap).unwrap_or_else(|| {
+                msg!(
+                    "WARN: return_amount_1 overflow: leftover_1={}, out_from_swap={}",
+                    leftover_1,
+                    out_from_swap
+                );
+                0
+            });
             return_amount_0 = if kept_other { leftover_0 } else { 0 };
         }
     }

@@ -72,9 +72,10 @@ pub fn calc_min_amount_out(
         raw
     };
 
-    // apply Raydium trade fee (10^-6) then slippage (bps)
-    let out_after_fee = (out_before_fee_and_slippage * fee_factor) / U256::from(1_000_000u128);
-    let out = (out_after_fee * slippage_factor) / U256::from(10_000u128);
+    // LPH-010: 费用与滑点若分两次除法，会各自向下取整，产生复合精度损失。
+    // 合并为一次整体除法，只截断一次，且仍保持 floor 语义（min_out 不会被抬高）。
+    let denom = U256::from(1_000_000u128) * U256::from(10_000u128);
+    let out = (out_before_fee_and_slippage * fee_factor * slippage_factor) / denom;
 
     // 防御：避免 U256 -> u64 截断
     require!(
@@ -82,8 +83,6 @@ pub fn calc_min_amount_out(
         LpDepositError::MathOverflow
     );
     let out = out.as_u64();
-    // 防御：避免 swap 后输出 token 数量过小，导致 Raydium CPI 失败
-    let out = out.checked_sub(100).unwrap_or(0);
     Ok(out)
 }
 
@@ -119,7 +118,10 @@ pub fn calculate_optimal_swap_amount(
         sqrt_price_current_x64,
         tick_lower_index,
         tick_upper_index,
-        liquidity.try_into().unwrap(),
+        // LPH-016: 避免 unwrap 导致 panic；改为显式错误传播。
+        liquidity
+            .try_into()
+            .map_err(|_| error!(LpDepositError::MathOverflow))?,
     )?;
     msg!(
         "amount_0_needed={}, amount_1_needed={}",
@@ -156,7 +158,10 @@ pub fn calculate_principal_amounts_for_liquidity(
         sqrt_price_current_x64,
         tick_lower_index,
         tick_upper_index,
-        liquidity.try_into().unwrap(),
+        // LPH-016: 避免 unwrap 导致 panic；改为显式错误传播。
+        liquidity
+            .try_into()
+            .map_err(|_| error!(LpDepositError::MathOverflow))?,
     )?;
     Ok((amount_0, amount_1))
 }

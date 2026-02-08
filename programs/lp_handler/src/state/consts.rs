@@ -29,3 +29,7 @@ pub const ALLOWED_ACCOUNT_OWNERS: &[Pubkey] = &[
     anchor_spl::associated_token::ID,
     raydium_amm_v3::ID,
 ];
+
+pub const USDC_MIN: Pubkey = pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+
+pub const MIN_USDC_SWAP_AMOUNT: u64 = 1000;

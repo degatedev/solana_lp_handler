@@ -12,7 +12,7 @@ use state::*;
 
 // ProgramId 需要与部署的 program keypair 对应的地址一致。
 // 本分支统一使用生产环境（mainnet）的 ProgramId。
-declare_id!("DnhxA7ufxEUfR3BM2UuXWf7DK6v25JQ7CxQ6r6sJswNs");
+declare_id!("3jz7Mwbqk5RoQRbVSKdeNCLYwbmLgE3tARweHNZNTQQ9");
 
 #[program]
 #[allow(deprecated)]
@@ -23,12 +23,14 @@ pub mod lp_handler {
     ///
     /// - **signer**: 本次指令的签名者（安全层会对其 token accounts 做 authority/delegate/close_authority 对账）
     /// - **recipient**: 本次指令允许的“收款/接收方”（用于出口阶段允许新建 token account 的 authority）
+    /// - **fee_owner**: 本次指令声明的手续费收款方（安全层会校验其必须在 security_config.fee_owners 白名单内）
     /// - **pool_state**: 本次业务涉及的 pool_state（用于 pool 白名单校验）
     macro_rules! secure_entrypoint {
         (
             $ctx:expr,
             signer = $signer:expr,
             recipient = $recipient:expr,
+            fee_owner = $fee_owner:expr,
             pool_state = $pool:expr,
             body = $body:expr
         ) => {{
@@ -45,6 +47,7 @@ pub mod lp_handler {
                 $pool,
                 $signer,
                 $recipient,
+                $fee_owner,
                 &policy,
             )?;
             let res = $body;
@@ -69,10 +72,12 @@ pub mod lp_handler {
     ) -> Result<()> {
         let signer = ctx.accounts.signer.key();
         let recipient = ctx.accounts.recipient.key();
+        let fee_owner = ctx.accounts.fee_owner.key();
         secure_entrypoint!(
             ctx,
             signer = signer,
             recipient = recipient,
+            fee_owner = fee_owner,
             pool_state = &ctx.accounts.pool_state,
             body = instructions::swap_and_deposit(
                 ctx,
@@ -104,10 +109,12 @@ pub mod lp_handler {
     ) -> Result<()> {
         let signer = ctx.accounts.signer.key();
         let recipient = ctx.accounts.recipient.key();
+        let fee_owner = ctx.accounts.fee_owner.key();
         secure_entrypoint!(
             ctx,
             signer = signer,
             recipient = recipient,
+            fee_owner = fee_owner,
             pool_state = &ctx.accounts.pool_state,
             body = instructions::decrease_liquidity(
                 ctx,
@@ -135,10 +142,12 @@ pub mod lp_handler {
         swap_input_is_token0: bool,
     ) -> Result<()> {
         let signer = ctx.accounts.signer.key();
+        let fee_owner = ctx.accounts.fee_owner.key();
         secure_entrypoint!(
             ctx,
             signer = signer,
             recipient = signer,
+            fee_owner = fee_owner,
             pool_state = &ctx.accounts.pool_state,
             body = instructions::increase_liquidity(
                 ctx,

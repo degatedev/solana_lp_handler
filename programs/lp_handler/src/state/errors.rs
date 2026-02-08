@@ -76,9 +76,6 @@ pub enum LpDepositError {
     #[msg("Security config admin unauthorized: authority is not admin")]
     SecurityConfigAdminUnauthorized,
 
-    #[msg("Token-2022 mint has forbidden high-risk extensions (e.g. PermanentDelegate/TransferHook/Confidential/NonTransferable)")]
-    SecurityToken2022ForbiddenExtension,
-
     #[msg("Account set changed: an account present at entry is missing at exit (account set must be closed)")]
     SecurityAccountSetChanged,
 
@@ -109,4 +106,7 @@ pub enum LpDepositError {
         "Non-whitelisted token account: token account authority is not user or allowed authorities or pool supported token account"
     )]
     SecurityNonWhitelistTokenAccount,
+
+    #[msg("Invalid recipient: recipient pubkey is not present in instruction accounts")]
+    RecipientNotInAccounts,
 }

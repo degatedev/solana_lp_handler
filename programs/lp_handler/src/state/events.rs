@@ -75,3 +75,40 @@ pub struct LpHandlerDecreaseLiquidityEvent {
     /// 集成商收取的结算 token1 费用
     pub fee_settled_1: u64,
 }
+
+// ========== LPH-015: Security Config 配置变更事件 ==========
+
+/// Security Config 初始化事件
+#[event]
+pub struct SecurityConfigInitialized {
+    /// 管理员地址
+    pub authority: Pubkey,
+    /// 白名单 pool 列表
+    pub pools: Vec<Pubkey>,
+    /// 手续费接收者列表
+    pub fee_owners: Vec<Pubkey>,
+}
+
+/// Security Config 更新事件
+#[event]
+pub struct SecurityConfigUpdated {
+    /// 管理员地址
+    pub authority: Pubkey,
+    /// 更新后的 pool 列表
+    pub pools: Vec<Pubkey>,
+    /// 更新后的 fee_owners 列表
+    pub fee_owners: Vec<Pubkey>,
+}
+
+/// Security Config 关闭事件
+#[event]
+pub struct SecurityConfigClosed {
+    /// 管理员地址
+    pub authority: Pubkey,
+    /// 接收租金的地址
+    pub receiver: Pubkey,
+    /// 关闭前的 pool 数量
+    pub pools_count: usize,
+    /// 关闭前的 fee_owners 数量
+    pub fee_owners_count: usize,
+}

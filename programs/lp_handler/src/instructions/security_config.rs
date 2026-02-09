@@ -1,7 +1,8 @@
 use anchor_lang::prelude::*;
 
 use crate::{
-    LpDepositError, SecurityConfig, MAX_ALLOWED_POOLS, MAX_FEE_OWNERS, SECURITY_CONFIG_SEED,
+    LpDepositError, SecurityConfig, SecurityConfigClosed, SecurityConfigInitialized,
+    SecurityConfigUpdated, MAX_ALLOWED_POOLS, MAX_FEE_OWNERS, SECURITY_CONFIG_SEED,
 };
 
 pub fn init_security_config(
@@ -20,8 +21,16 @@ pub fn init_security_config(
     );
     let cfg = &mut ctx.accounts.security_config;
     cfg.authority = ctx.accounts.authority.key();
-    cfg.pools = pools;
-    cfg.fee_owners = fee_owners;
+    cfg.pools = pools.clone();
+    cfg.fee_owners = fee_owners.clone();
+
+    // LPH-015: 发射配置初始化事件
+    emit!(SecurityConfigInitialized {
+        authority: cfg.authority,
+        pools,
+        fee_owners,
+    });
+
     Ok(())
 }
 
@@ -40,12 +49,30 @@ pub fn update_security_config(
         LpDepositError::MathOverflow
     );
     let cfg = &mut ctx.accounts.security_config;
-    cfg.pools = pools;
-    cfg.fee_owners = fee_owners;
+    cfg.pools = pools.clone();
+    cfg.fee_owners = fee_owners.clone();
+
+    // LPH-015: 发射配置更新事件
+    emit!(SecurityConfigUpdated {
+        authority: cfg.authority,
+        pools,
+        fee_owners,
+    });
+
     Ok(())
 }
 
-pub fn close_security_config(_ctx: Context<CloseSecurityConfig>) -> Result<()> {
+pub fn close_security_config(ctx: Context<CloseSecurityConfig>) -> Result<()> {
+    let cfg = &ctx.accounts.security_config;
+
+    // LPH-015: 发射配置关闭事件
+    emit!(SecurityConfigClosed {
+        authority: cfg.authority,
+        receiver: ctx.accounts.receiver.key(),
+        pools_count: cfg.pools.len(),
+        fee_owners_count: cfg.fee_owners.len(),
+    });
+
     Ok(())
 }
 #[derive(Accounts)]

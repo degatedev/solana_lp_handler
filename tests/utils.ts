@@ -1,9 +1,8 @@
 // clmm-zap-single-sided.ts
 import BN from 'bn.js';
 import Decimal from 'decimal.js';
-import { Connection, EpochInfo } from '@solana/web3.js';
+import { EpochInfo } from '@solana/web3.js';
 import {
-  ApiV3PoolInfoConcentratedItem,
   ApiV3Token,
   ComputeClmmPoolInfo,
   ReturnTypeFetchMultiplePoolTickArrays,
@@ -36,13 +35,13 @@ export type ClmmQuote = {
   /** 这笔 swap 计算后的价格（sqrtPriceX64，Q64.64） */
   executionPriceX64: SqrtPriceX64;
 };
-export type ClmmQuoteFn = (amountIn: BN, inputIsMintA: boolean, slippage?: number) => ClmmQuote;
+export type ClmmQuoteFn = (amountIn: BN, inputIsMintA: boolean, slippage: string) => ClmmQuote;
 
-export type BuildClmmQuoteContext = {
-  computePool: ComputeClmmPoolInfo;
-  tickArrayCache: ReturnTypeFetchMultiplePoolTickArrays;
+export type BuildClmmQuoteParams = {
   epochInfo: EpochInfo;
-  quote: ClmmQuoteFn;
+  computePool: ComputeClmmPoolInfo;
+  tickArrayCache: ReturnTypeFetchMultiplePoolTickArrays[string];
+  slippage: string;
 };
 
 /** 只保留“swap + 开仓”关心的字段 */
@@ -57,45 +56,41 @@ export type ZapPlan = {
   note?: string;
 };
 
+type SolveZapSingleSidedCLMMParams = {
+  tickLower: number;
+  tickUpper: number;
+  /** 双币输入：分别是 mintA/mintB 的最小单位数量 */
+  amountAInBN: BN;
+  amountBInBN: BN;
+  ratioTolerance?: number;
+  amountToleranceBN?: BN;
+  maxIter?: number;
+} & BuildClmmQuoteParams;
+
 /** —— 工具 —— */
 const bnToDec = (bn: BN) => new Decimal(bn.toString());
-const decToBn = (x: Decimal) => new BN(x.toFixed(0));
 const sFromX64 = (x64: BN) => new Decimal(x64.toString()).div(new Decimal(Q64.toString()));
 
 /** 构建离链报价上下文（含 tick 缓存与 epochInfo） */
-export async function buildClmmQuoteContext(opts: {
-  connection: Connection;
-  apiPoolItem: Pick<ApiV3PoolInfoConcentratedItem, 'id' | 'programId' | 'mintA' | 'mintB' | 'config' | 'price'>;
-  batchRequest?: boolean;
-}): Promise<BuildClmmQuoteContext> {
-  const { connection, apiPoolItem, batchRequest = true } = opts;
-
-  const computePool: ComputeClmmPoolInfo = await PoolUtils.fetchComputeClmmInfo({
-    connection,
-    poolInfo: apiPoolItem
-  });
-
-  const tickArrayCache: ReturnTypeFetchMultiplePoolTickArrays = await PoolUtils.fetchMultiplePoolTickArrays({
-    connection,
-    poolKeys: [computePool],
-    batchRequest
-  });
-
-  const epochInfo: EpochInfo = await connection.getEpochInfo();
-
+export function buildClmmQuoteContext(opts: BuildClmmQuoteParams): ClmmQuoteFn {
+  const { epochInfo, computePool, tickArrayCache, slippage: _slippage } = opts;
   /** 通用报价：给定输入边与金额，返回另一边输出与 allTrade */
-  const quote = (amountIn: BN, inputIsMintA: boolean, slippage = 0): ClmmQuote => {
+  const quote = (amountIn: BN, inputIsMintA: boolean, slippage: string = _slippage): ClmmQuote => {
     if (amountIn.lten(0)) {
-      return { out: new BN(0), allTrade: true, minOut: new BN(0), executionPriceX64: computePool.sqrtPriceX64 };
+      return {
+        out: new BN(0),
+        allTrade: true,
+        minOut: new BN(0),
+        executionPriceX64: computePool.sqrtPriceX64
+      };
     }
-
-    const tokenOut: ApiV3Token = inputIsMintA ? (apiPoolItem.mintB as any) : (apiPoolItem.mintA as any);
+    const tokenOut: ApiV3Token = inputIsMintA ? computePool.mintB : computePool.mintA;
     const res = PoolUtils.computeAmountOutFormat({
       poolInfo: computePool,
-      tickArrayCache: tickArrayCache[computePool.id.toBase58()],
+      tickArrayCache: tickArrayCache,
       amountIn,
       tokenOut,
-      slippage, // 报价用，slippage=0
+      slippage: Number(slippage || '0'),
       epochInfo,
       catchLiquidityInsufficient: true // 覆盖不足时返回 allTrade=false
     });
@@ -108,29 +103,17 @@ export async function buildClmmQuoteContext(opts: {
     };
   };
 
-  return { computePool, tickArrayCache, epochInfo, quote };
+  return quote;
 }
 
 /** 通用单边最优拆分（任意池、任意输入边） */
-export async function solveZapSingleSidedCLMM(opts: {
-  connection: Connection;
-  apiPoolItem: Pick<ApiV3PoolInfoConcentratedItem, 'id' | 'programId' | 'mintA' | 'mintB' | 'config' | 'price'>;
-  tickLower: number;
-  tickUpper: number;
-
-  /** 单边输入：指定哪一边（必须等于 mintA/mintB 的 address）与金额（最小单位） */
-  inputMint: string; // = pool.mintA.address 或 pool.mintB.address
-  amountInBN: BN;
-
-  slippage?: number;
-  /** 二分搜索控制参数 */
-  ratioTolerance?: number; // 目标比值相对误差阈值（默认 1e-8）
-  amountToleranceBN?: BN; // 金额步长阈值（默认 ≈ 1e-6 * 10^decimals(input)）
-  maxIter?: number; // 最大迭代次数（默认 60）
-}): Promise<ZapPlan> {
+export function solveZapSingleSidedCLMM(
+  opts: Omit<SolveZapSingleSidedCLMMParams, 'amountAInBN' | 'amountBInBN'> & {
+    inputMint: string;
+    amountInBN: BN;
+  }
+): ZapPlan {
   const {
-    connection,
-    apiPoolItem,
     tickLower,
     tickUpper,
     inputMint,
@@ -138,14 +121,17 @@ export async function solveZapSingleSidedCLMM(opts: {
     ratioTolerance = 1e-8,
     amountToleranceBN,
     slippage,
-    maxIter = 100
+    maxIter = 100,
+    epochInfo,
+    computePool,
+    tickArrayCache
   } = opts;
 
-  const inputIsMintA = inputMint === apiPoolItem.mintA.address;
-  if (!inputIsMintA && inputMint !== apiPoolItem.mintB.address) {
+  const inputIsMintA = inputMint === computePool.mintA.address;
+  if (!inputIsMintA && inputMint !== computePool.mintB.address) {
     throw new Error('inputMint 必须等于 pool.mintA.address 或 pool.mintB.address');
   }
-  const { computePool, quote } = await buildClmmQuoteContext({ connection, apiPoolItem });
+  const quote = buildClmmQuoteContext({ epochInfo, computePool, tickArrayCache, slippage });
 
   // —— 价格边界（使用链上 √P，避免方向错误）——
   const sa = sFromX64(SqrtPriceMath.getSqrtPriceX64FromTick(tickLower));
@@ -165,10 +151,9 @@ export async function solveZapSingleSidedCLMM(opts: {
     let amountBForPosition = new BN(0);
     let note = onlyToken0 ? '区间在现价上方，仅需 token0' : '区间在现价下方，仅需 token1';
     let allTradeOk = true;
-
     if ((onlyToken0 && !inputIsMintA) || (!onlyToken0 && inputIsMintA)) {
       // 需要把全部换成目标边
-      const quoted = quote(amountInBN, inputIsMintA, slippage ?? 0);
+      const quoted = quote(amountInBN, inputIsMintA, slippage);
       swapDirection = inputIsMintA ? ZapSwapDirection.AtoB : ZapSwapDirection.BtoA;
       swapAmountIN = amountInBN;
       swapAmountOut = quoted.out;
@@ -212,9 +197,8 @@ export async function solveZapSingleSidedCLMM(opts: {
   // （可选）记录最佳值，用于 maxIter 触顶兜底
   let best = { y: new BN(0), out: new BN(0), minOut: new BN(0), err: new Decimal(Infinity) };
 
-  const evalAt = async (y: BN) => {
-    const { out, minOut, allTrade, executionPriceX64 } = quote(y, inputIsMintA, slippage ?? 0);
-
+  const evalAt = (y: BN) => {
+    const { out, minOut, allTrade, executionPriceX64 } = quote(y, inputIsMintA, slippage);
     // 关键：你是 “swap 指令在前，openPosition 在后”，开仓时用的是 swap 后价格
     const spAfter = sFromX64(executionPriceX64);
     // swap 后价格推到区间外 → 开仓将退化为单边；这时继续增大 y 只会更偏离
@@ -244,7 +228,7 @@ export async function solveZapSingleSidedCLMM(opts: {
 
   while (iters++ < maxIter) {
     const mid = lo.add(hi).divn(2);
-    const { ratio, out, minOut, allTrade, Rstar } = await evalAt(mid);
+    const { ratio, out, minOut, allTrade, Rstar } = evalAt(mid);
 
     // 报价未能完全成交 → 收紧上界，继续搜（常见于 tick 缓存不足）
     if (!allTrade) {
@@ -305,24 +289,8 @@ export async function solveZapSingleSidedCLMM(opts: {
  * 每次评估都使用 swap 后的 executionPriceX64 动态计算当前区间的最优配比 R*(token1/token0)，
  * 二分出需要 swap 的数量，使得 swap 后的 (amount1/amount0) ≈ R*，从而尽量两边都用满。
  */
-export async function solveZapTwoSidedCLMM(opts: {
-  connection: Connection;
-  apiPoolItem: Pick<ApiV3PoolInfoConcentratedItem, 'id' | 'programId' | 'mintA' | 'mintB' | 'config' | 'price'>;
-  tickLower: number;
-  tickUpper: number;
-
-  /** 双币输入：分别是 mintA/mintB 的最小单位数量 */
-  amountAInBN: BN;
-  amountBInBN: BN;
-
-  slippage?: number;
-  ratioTolerance?: number;
-  amountToleranceBN?: BN;
-  maxIter?: number;
-}): Promise<ZapPlan> {
+export function solveZapTwoSidedCLMM(opts: SolveZapSingleSidedCLMMParams): ZapPlan {
   const {
-    connection,
-    apiPoolItem,
     tickLower,
     tickUpper,
     amountAInBN,
@@ -330,7 +298,10 @@ export async function solveZapTwoSidedCLMM(opts: {
     slippage,
     ratioTolerance = 1e-8,
     amountToleranceBN,
-    maxIter = 100
+    maxIter = 100,
+    epochInfo,
+    computePool,
+    tickArrayCache
   } = opts;
 
   // 入参校验
@@ -343,37 +314,37 @@ export async function solveZapTwoSidedCLMM(opts: {
 
   // 退化：单边输入直接复用单边逻辑（保持行为一致）
   if (amountAInBN.lten(0)) {
-    const r = await solveZapSingleSidedCLMM({
-      connection,
-      apiPoolItem,
+    return solveZapSingleSidedCLMM({
+      epochInfo,
+      computePool,
+      tickArrayCache,
       tickLower,
       tickUpper,
-      inputMint: apiPoolItem.mintB.address,
+      inputMint: computePool.mintB.address,
       amountInBN: amountBInBN,
       slippage,
       ratioTolerance,
       amountToleranceBN,
       maxIter
     });
-    return r;
   }
   if (amountBInBN.lten(0)) {
-    const r = await solveZapSingleSidedCLMM({
-      connection,
-      apiPoolItem,
+    return solveZapSingleSidedCLMM({
+      epochInfo,
+      computePool,
+      tickArrayCache,
       tickLower,
       tickUpper,
-      inputMint: apiPoolItem.mintA.address,
+      inputMint: computePool.mintA.address,
       amountInBN: amountAInBN,
       slippage,
       ratioTolerance,
       amountToleranceBN,
       maxIter
     });
-    return r;
   }
 
-  const { computePool, quote } = await buildClmmQuoteContext({ connection, apiPoolItem });
+  const quote = buildClmmQuoteContext({ epochInfo, computePool, tickArrayCache, slippage });
 
   const sa = sFromX64(SqrtPriceMath.getSqrtPriceX64FromTick(tickLower));
   const sb = sFromX64(SqrtPriceMath.getSqrtPriceX64FromTick(tickUpper));
@@ -385,7 +356,7 @@ export async function solveZapTwoSidedCLMM(opts: {
     const onlyToken0 = sp.lte(sa); // true=仅需 token0(mintA)，false=仅需 token1(mintB)
     if (onlyToken0) {
       // 仅需 A：把 B 全换成 A
-      const q = quote(amountBInBN, false, slippage ?? 0);
+      const q = quote(amountBInBN, false, slippage);
       return {
         mode: ZapMode.SingleTokenOnly,
         swapDirection: amountBInBN.gt(new BN(0)) ? ZapSwapDirection.BtoA : ZapSwapDirection.None,
@@ -398,7 +369,7 @@ export async function solveZapTwoSidedCLMM(opts: {
       };
     }
     // 仅需 B：把 A 全换成 B
-    const q = quote(amountAInBN, true, slippage ?? 0);
+    const q = quote(amountAInBN, true, slippage);
     return {
       mode: ZapMode.SingleTokenOnly,
       swapDirection: amountAInBN.gt(new BN(0)) ? ZapSwapDirection.AtoB : ZapSwapDirection.None,
@@ -435,11 +406,9 @@ export async function solveZapTwoSidedCLMM(opts: {
     minOut: new BN(0),
     err: new Decimal(Infinity)
   };
-
-  const evalAt = async (y: BN) => {
+  const evalAt = (y: BN) => {
     // 把 y 从过多的一侧换到另一侧
-    const q = swapBtoA ? quote(y, false, slippage ?? 0) : quote(y, true, slippage ?? 0);
-
+    const q = swapBtoA ? quote(y, false, slippage) : quote(y, true, slippage);
     // 若报价未完全成交/或 swap 后把价格推到区间外，都认为该 y 不可用，交由上层收紧区间
     const spAfter = sFromX64(q.executionPriceX64);
     if (!q.allTrade || spAfter.lte(sa) || spAfter.gte(sb)) {
@@ -480,7 +449,7 @@ export async function solveZapTwoSidedCLMM(opts: {
 
   while (iters++ < maxIter) {
     const mid = lo.add(hi).divn(2);
-    const res = await evalAt(mid);
+    const res = evalAt(mid);
 
     if (!res.ok) {
       // 不可用：收紧上界（通常是把价格推到区间外或 tick 缓存不足）
@@ -520,7 +489,7 @@ export async function solveZapTwoSidedCLMM(opts: {
   }
 
   // 触达迭代上限：用 best 近似
-  const qBest = swapBtoA ? quote(best.y, false, slippage ?? 0) : quote(best.y, true, slippage ?? 0);
+  const qBest = swapBtoA ? quote(best.y, false, slippage) : quote(best.y, true, slippage);
   const amountAForPosition = swapBtoA ? amountAInBN.add(qBest.minOut) : amountAInBN.sub(best.y);
   const amountBForPosition = swapBtoA ? amountBInBN.sub(best.y) : amountBInBN.add(qBest.minOut);
 

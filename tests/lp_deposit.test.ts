@@ -87,15 +87,30 @@ describe('lp_deposit', () => {
     const positionNftAccount = getATAAddress(user, positionNftMint, TOKEN_2022_PROGRAM_ID);
     const personalPosition = getPdaPersonalPositionAddress(poolProgramId, positionNftMint);
     const poolInfo = await getPoolInfo();
-    const res = await solveZapTwoSidedCLMM({
+    const computePool = await PoolUtils.fetchComputeClmmInfo({
       connection: raydium.connection,
-      apiPoolItem: poolInfo,
+      poolInfo: poolInfo
+    });
+
+    const [tickArrayCaches, epochInfo] = await Promise.all([
+      PoolUtils.fetchMultiplePoolTickArrays({
+        connection: raydium.connection,
+        poolKeys: [computePool],
+        batchRequest: true
+      }),
+      raydium.connection.getEpochInfo()
+    ]);
+    const tickArrayCache = tickArrayCaches[computePool.id.toBase58()];
+
+    const res = await solveZapTwoSidedCLMM({
+      tickArrayCache: tickArrayCache,
+      computePool,
+      epochInfo,
       tickLower: tickLower,
       tickUpper: tickUpper,
       amountAInBN: isMintA ? new BN(deposit_amount) : new BN(0),
       amountBInBN: !isMintA ? new BN(deposit_amount) : new BN(0),
-      // computeAmountOutFormat 的 slippage 参数是百分比小数（例如 50bps = 0.005）
-      slippage: slippage / 10_000
+      slippage: (slippage / 10_000).toString()
     });
     const tickArrayBitmapExtension = getPdaExBitmapAccount(poolProgramId, pool_address).publicKey;
     const remainingAccounts = [];

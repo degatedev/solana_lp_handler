@@ -65,8 +65,7 @@ describe('lp_increase_liquidity', () => {
     poolKeys = await getPoolKeys();
   }, 50000);
 
-  it('lp_deposit test', async () => {
-    // Add your test here.
+  async function simulateIncreaseLiquidity(overrides?: { quotedMode?: number; quotedSqrtPriceX64?: anchor.BN }) {
     const { tickLower, tickUpper } = getTickLowerAndUpper(poolKeys, startPrice, endPrice);
     const poolProgramId = new PublicKey(poolKeys.programId);
     const allPosition = await raydium.clmm.getOwnerPositionInfo({ programId: CLMM_PROGRAM_ID });
@@ -175,6 +174,7 @@ describe('lp_increase_liquidity', () => {
     const amount0In = isMintA ? new BN(deposit_amount) : new BN(0);
     const amount1In = !isMintA ? new BN(deposit_amount) : new BN(0);
     const swapInputIsToken0 = res.swapDirection === ZapSwapDirection.AtoB;
+    const quotedSqrtPriceX64 = overrides?.quotedSqrtPriceX64 ?? new BN(computePool.sqrtPriceX64.toString());
     // returnMint 可选：传入则会在链上把剩余统一换回该 mint；不传则不做剩余兑换
     const returnMint = deposit_token_mint;
 
@@ -185,6 +185,8 @@ describe('lp_increase_liquidity', () => {
         returnMint,
         tickLower,
         tickUpper,
+        overrides?.quotedMode ?? res.quotedMode,
+        quotedSqrtPriceX64,
         slippage,
         res.swapAmountIN,
         res.swapMinOut,
@@ -252,6 +254,27 @@ describe('lp_increase_liquidity', () => {
       innerInstructions: true
     });
 
+    return {
+      transactionResult,
+      quotedSqrtPriceX64: new BN(computePool.sqrtPriceX64.toString())
+    };
+  }
+
+  it('lp_deposit test', async () => {
+    const { transactionResult } = await simulateIncreaseLiquidity();
+
     expect(transactionResult.value.err).toBeNull();
+  }, 500000);
+
+  it('rejects quoted price below minimum', async () => {
+    const { quotedSqrtPriceX64 } = await simulateIncreaseLiquidity();
+    const { transactionResult } = await simulateIncreaseLiquidity({
+      quotedSqrtPriceX64: quotedSqrtPriceX64.muln(2)
+    });
+
+    expect(transactionResult.value.err).not.toBeNull();
+    expect((transactionResult.value.logs || []).join('\n')).toContain(
+      'Current pool price is below the quoted minimum acceptable price'
+    );
   }, 500000);
 });

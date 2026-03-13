@@ -47,6 +47,15 @@ pub enum LpDepositError {
     #[msg("Invalid tick range")]
     InvalidTickRange,
 
+    #[msg("Invalid quoted zap mode")]
+    InvalidQuotedMode,
+
+    #[msg("Execution mode no longer matches quoted mode")]
+    QuotedModeMismatch,
+
+    #[msg("Current pool price is below the quoted minimum acceptable price")]
+    QuotedPriceBelowMinimum,
+
     #[msg("No claimable rewards or redeemable principal")]
     NoBalanceChange,
 

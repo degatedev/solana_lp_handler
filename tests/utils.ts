@@ -19,10 +19,10 @@ export enum ZapSwapDirection {
   None = 'none'
 }
 
-export enum ZapMode {
-  SingleTokenOnly = 'single-token-only',
-  TwoTokens = 'two-tokens',
-  NoSwap = 'no-swap'
+export enum QuotedZapMode {
+  InRange = 0,
+  OutOfRangeToken0Only = 1,
+  OutOfRangeToken1Only = 2
 }
 
 export type ClmmQuote = {
@@ -46,7 +46,7 @@ export type BuildClmmQuoteParams = {
 
 /** 只保留“swap + 开仓”关心的字段 */
 export type ZapPlan = {
-  mode: ZapMode;
+  quotedMode: QuotedZapMode;
   swapDirection: ZapSwapDirection;
   swapAmountIN: BN;
   swapAmountOut: BN;
@@ -70,6 +70,19 @@ type SolveZapSingleSidedCLMMParams = {
 /** —— 工具 —— */
 const bnToDec = (bn: BN) => new Decimal(bn.toString());
 const sFromX64 = (x64: BN) => new Decimal(x64.toString()).div(new Decimal(Q64.toString()));
+
+export function deriveQuotedModeFromPrice(
+  tickLower: number,
+  tickUpper: number,
+  quotedSqrtPriceX64: SqrtPriceX64
+): QuotedZapMode {
+  const lower = SqrtPriceMath.getSqrtPriceX64FromTick(tickLower);
+  const upper = SqrtPriceMath.getSqrtPriceX64FromTick(tickUpper);
+
+  if (quotedSqrtPriceX64.lte(lower)) return QuotedZapMode.OutOfRangeToken0Only;
+  if (quotedSqrtPriceX64.gte(upper)) return QuotedZapMode.OutOfRangeToken1Only;
+  return QuotedZapMode.InRange;
+}
 
 /** 构建离链报价上下文（含 tick 缓存与 epochInfo） */
 export function buildClmmQuoteContext(opts: BuildClmmQuoteParams): ClmmQuoteFn {
@@ -132,6 +145,7 @@ export function solveZapSingleSidedCLMM(
     throw new Error('inputMint 必须等于 pool.mintA.address 或 pool.mintB.address');
   }
   const quote = buildClmmQuoteContext({ epochInfo, computePool, tickArrayCache, slippage });
+  const quotedMode = deriveQuotedModeFromPrice(tickLower, tickUpper, computePool.sqrtPriceX64);
 
   // —— 价格边界（使用链上 √P，避免方向错误）——
   const sa = sFromX64(SqrtPriceMath.getSqrtPriceX64FromTick(tickLower));
@@ -173,7 +187,7 @@ export function solveZapSingleSidedCLMM(
     }
 
     return {
-      mode: ZapMode.SingleTokenOnly,
+      quotedMode,
       note,
       swapDirection,
       swapAmountIN,
@@ -244,7 +258,7 @@ export function solveZapSingleSidedCLMM(
     if (err.lte(ratioTolerance) || mid.sub(last).abs().lte(amtTol) || hi.sub(lo).lte(amtTol)) {
       const keepBN = amountInBN.sub(mid);
       return {
-        mode: ZapMode.TwoTokens,
+        quotedMode,
         swapDirection: inputIsMintA ? ZapSwapDirection.AtoB : ZapSwapDirection.BtoA,
         swapAmountIN: mid,
         swapAmountOut: out,
@@ -272,7 +286,7 @@ export function solveZapSingleSidedCLMM(
   const keepBN = amountInBN.sub(best.y);
 
   return {
-    mode: ZapMode.TwoTokens,
+    quotedMode,
     swapAmountIN: best.y,
     swapDirection: inputIsMintA ? ZapSwapDirection.AtoB : ZapSwapDirection.BtoA,
     swapAmountOut: best.out,
@@ -345,6 +359,7 @@ export function solveZapTwoSidedCLMM(opts: SolveZapSingleSidedCLMMParams): ZapPl
   }
 
   const quote = buildClmmQuoteContext({ epochInfo, computePool, tickArrayCache, slippage });
+  const quotedMode = deriveQuotedModeFromPrice(tickLower, tickUpper, computePool.sqrtPriceX64);
 
   const sa = sFromX64(SqrtPriceMath.getSqrtPriceX64FromTick(tickLower));
   const sb = sFromX64(SqrtPriceMath.getSqrtPriceX64FromTick(tickUpper));
@@ -358,7 +373,7 @@ export function solveZapTwoSidedCLMM(opts: SolveZapSingleSidedCLMMParams): ZapPl
       // 仅需 A：把 B 全换成 A
       const q = quote(amountBInBN, false, slippage);
       return {
-        mode: ZapMode.SingleTokenOnly,
+        quotedMode,
         swapDirection: amountBInBN.gt(new BN(0)) ? ZapSwapDirection.BtoA : ZapSwapDirection.None,
         swapAmountIN: amountBInBN,
         swapAmountOut: q.out,
@@ -371,7 +386,7 @@ export function solveZapTwoSidedCLMM(opts: SolveZapSingleSidedCLMMParams): ZapPl
     // 仅需 B：把 A 全换成 B
     const q = quote(amountAInBN, true, slippage);
     return {
-      mode: ZapMode.SingleTokenOnly,
+      quotedMode,
       swapDirection: amountAInBN.gt(new BN(0)) ? ZapSwapDirection.AtoB : ZapSwapDirection.None,
       swapAmountIN: amountAInBN,
       swapAmountOut: q.out,
@@ -437,7 +452,7 @@ export function solveZapTwoSidedCLMM(opts: SolveZapSingleSidedCLMMParams): ZapPl
   const roughErr = ratioNow.minus(Rstar_sp).abs().div(Decimal.max(Rstar_sp, 1e-18));
   if (roughErr.lte(ratioTolerance)) {
     return {
-      mode: ZapMode.NoSwap,
+      quotedMode,
       swapDirection: ZapSwapDirection.None,
       swapAmountIN: new BN(0),
       swapAmountOut: new BN(0),
@@ -465,7 +480,7 @@ export function solveZapTwoSidedCLMM(opts: SolveZapSingleSidedCLMMParams): ZapPl
 
     if (err.lte(ratioTolerance) || mid.sub(last).abs().lte(amtTol) || hi.sub(lo).lte(amtTol)) {
       return {
-        mode: ZapMode.TwoTokens,
+        quotedMode,
         swapDirection: swapBtoA ? ZapSwapDirection.BtoA : ZapSwapDirection.AtoB,
         swapAmountIN: mid,
         swapAmountOut: res.out,
@@ -494,7 +509,7 @@ export function solveZapTwoSidedCLMM(opts: SolveZapSingleSidedCLMMParams): ZapPl
   const amountBForPosition = swapBtoA ? amountBInBN.sub(best.y) : amountBInBN.add(qBest.minOut);
 
   return {
-    mode: ZapMode.TwoTokens,
+    quotedMode,
     swapDirection: swapBtoA ? ZapSwapDirection.BtoA : ZapSwapDirection.AtoB,
     swapAmountIN: best.y,
     swapAmountOut: qBest.out,

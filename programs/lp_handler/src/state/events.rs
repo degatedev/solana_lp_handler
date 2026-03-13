@@ -108,7 +108,7 @@ pub struct SecurityConfigClosed {
     /// 接收租金的地址
     pub receiver: Pubkey,
     /// 关闭前的 pool 数量
-    pub pools_count: usize,
+    pub pools_count: u32,
     /// 关闭前的 fee_owners 数量
-    pub fee_owners_count: usize,
+    pub fee_owners_count: u32,
 }

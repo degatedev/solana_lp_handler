@@ -177,7 +177,16 @@ describe('lp_withdraw', () => {
     );
 
     const instruction = await program.methods
-      .decreaseLiquidity(position.liquidity, new BN(0), new BN(0), deposit_token_mint, slippage, fee_percent, true)
+      .decreaseLiquidity(
+        position.liquidity,
+        new BN(0),
+        new BN(0),
+        deposit_token_mint,
+        new BN(data.computePoolInfo.sqrtPriceX64.toString()),
+        slippage,
+        fee_percent,
+        true
+      )
       .accountsStrict({
         raydiumClmmProgram: CLMM_PROGRAM_ID,
         signer: user,

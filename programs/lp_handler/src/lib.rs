@@ -12,7 +12,7 @@ use state::*;
 
 // ProgramId 需要与部署的 program keypair 对应的地址一致。
 // 本分支统一使用生产环境（mainnet）的 ProgramId。
-declare_id!("3jz7Mwbqk5RoQRbVSKdeNCLYwbmLgE3tARweHNZNTQQ9");
+declare_id!("HM7ZJsDUZfbXboyDxrVbZ7qCvoEqUXqTVjeHHuWKcCmK");
 
 #[program]
 #[allow(deprecated)]
@@ -65,6 +65,8 @@ pub mod lp_handler {
         return_mint: Option<Pubkey>,
         tick_lower_index: i32,
         tick_upper_index: i32,
+        quoted_mode: u8,
+        quoted_sqrt_price_x64: u128,
         slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
         swap_amount_in: u64,
         swap_min_out: u64,
@@ -86,6 +88,8 @@ pub mod lp_handler {
                 return_mint,
                 tick_lower_index,
                 tick_upper_index,
+                quoted_mode,
+                quoted_sqrt_price_x64,
                 slippage_bps,
                 swap_amount_in,
                 swap_min_out,
@@ -103,6 +107,7 @@ pub mod lp_handler {
         mint_amount_0: u64,
         mint_amount_1: u64,
         swap_to_token_mint: Pubkey,
+        quoted_sqrt_price_x64: u128,
         slippage_bps: u16,
         fee_percent: u16,
         convert_to_usdc: bool,
@@ -122,6 +127,7 @@ pub mod lp_handler {
                 mint_amount_0,
                 mint_amount_1,
                 swap_to_token_mint,
+                quoted_sqrt_price_x64,
                 slippage_bps,
                 fee_percent,
                 convert_to_usdc,
@@ -136,6 +142,8 @@ pub mod lp_handler {
         return_mint: Option<Pubkey>,
         tick_lower_index: i32,
         tick_upper_index: i32,
+        quoted_mode: u8,
+        quoted_sqrt_price_x64: u128,
         slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
         swap_amount_in: u64,
         swap_min_out: u64,
@@ -156,6 +164,8 @@ pub mod lp_handler {
                 return_mint,
                 tick_lower_index,
                 tick_upper_index,
+                quoted_mode,
+                quoted_sqrt_price_x64,
                 slippage_bps, // 滑点，单位为基点 (1 bps = 0.01%)
                 swap_amount_in,
                 swap_min_out,

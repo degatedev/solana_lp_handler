@@ -22,6 +22,8 @@ use super::zap_common;
     return_mint: Option<Pubkey>,
     tick_lower_index: i32,
     tick_upper_index: i32,
+    quoted_mode: u8,
+    quoted_sqrt_price_x64: u128,
     slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
     swap_amount_in: u64,
     swap_min_out: u64,
@@ -186,6 +188,8 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
     return_mint: Option<Pubkey>,
     tick_lower_index: i32,
     tick_upper_index: i32,
+    quoted_mode: u8,
+    quoted_sqrt_price_x64: u128,
     slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
     swap_amount_in: u64,
     swap_min_out: u64,
@@ -199,6 +203,8 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
         return_mint,
         tick_lower_index,
         tick_upper_index,
+        quoted_mode,
+        quoted_sqrt_price_x64,
         slippage_bps,
         swap_amount_in,
         swap_min_out,

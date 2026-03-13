@@ -22,6 +22,7 @@ use crate::require_log;
   mint_amount_0:u64,
   mint_amount_1:u64,
   swap_to_token_mint: Pubkey,
+  quoted_sqrt_price_x64: u128,
   slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
   fee_percent: u16,
   convert_to_usdc: bool,
@@ -200,6 +201,7 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
     mint_amount_0: u64,
     mint_amount_1: u64,
     swap_to_token_mint: Pubkey,
+    quoted_sqrt_price_x64: u128,
     slippage_bps: u16,
     fee_percent: u16,
     convert_to_usdc: bool,
@@ -381,15 +383,10 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             .ok_or(LpDepositError::MathOverflow)?;
         let mut total_out_in_target: u64 = 0;
         if total_other_in > 0 {
-            // 为了避免“用旧价格估 min_out”导致过严/过松，在 CPI swap_v2 前重新读取 pool_state 的最新价格。
-            let sqrt_price_x64_for_min_out = {
-                let pool_state = ctx.accounts.pool_state.load()?;
-                pool_state.sqrt_price_x64
-            };
-            let swap_other_amount_threshold = utils::calc_min_amount_out(
+            let swap_other_amount_threshold = calc_swap_threshold_from_anchor_price(
                 total_other_in,
                 input_is_token0,
-                sqrt_price_x64_for_min_out,
+                quoted_sqrt_price_x64,
                 slippage_bps,
                 ctx.accounts.amm_config.trade_fee_rate,
             )?;
@@ -433,6 +430,15 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
                     total_other_in, // == reward_other_in
                 )?;
             } else {
+                let current_sqrt_price_x64 = {
+                    let pool_state = ctx.accounts.pool_state.load()?;
+                    pool_state.sqrt_price_x64
+                };
+                zap_common::validate_price_floor_from_quote(
+                    current_sqrt_price_x64,
+                    quoted_sqrt_price_x64,
+                    slippage_bps,
+                )?;
                 swap_v2(
                     &ctx,
                     total_other_in,
@@ -900,4 +906,55 @@ fn swap_v2<'a, 'b, 'c: 'info, 'info>(
         swap_other_amount_threshold,
         sqrt_price_limit_x64,
     )
+}
+
+fn calc_swap_threshold_from_anchor_price(
+    swap_amount: u64,
+    input_is_token0: bool,
+    quoted_sqrt_price_x64: u128,
+    slippage_bps: u16,
+    trade_fee_rate: u32,
+) -> Result<u64> {
+    utils::calc_min_amount_out(
+        swap_amount,
+        input_is_token0,
+        quoted_sqrt_price_x64,
+        slippage_bps,
+        trade_fee_rate,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use raydium_amm_v3::libraries::get_sqrt_price_at_tick;
+
+    #[test]
+    fn derived_swap_threshold_uses_quoted_price_anchor() {
+        let total_other_in = 1_000_000u64;
+        let input_is_token0 = true;
+        let quoted_sqrt_price_x64 = get_sqrt_price_at_tick(0).unwrap();
+        let current_sqrt_price_x64 = get_sqrt_price_at_tick(-200).unwrap();
+        let slippage_bps = 100u16;
+        let trade_fee_rate = 3_000u32;
+
+        let anchored = calc_swap_threshold_from_anchor_price(
+            total_other_in,
+            input_is_token0,
+            quoted_sqrt_price_x64,
+            slippage_bps,
+            trade_fee_rate,
+        )
+        .unwrap();
+        let current = utils::calc_min_amount_out(
+            total_other_in,
+            input_is_token0,
+            current_sqrt_price_x64,
+            slippage_bps,
+            trade_fee_rate,
+        )
+        .unwrap();
+
+        assert_ne!(anchored, current);
+    }
 }

@@ -184,7 +184,16 @@ describe('lp_claim', () => {
     );
 
     const instruction = await program.methods
-      .decreaseLiquidity(new BN(0), new BN(0), new BN(0), deposit_token_mint, slippage, fee_percent, true)
+      .decreaseLiquidity(
+        new BN(0),
+        new BN(0),
+        new BN(0),
+        deposit_token_mint,
+        new BN(clmmPoolInfo.sqrtPriceX64.toString()),
+        slippage,
+        fee_percent,
+        true
+      )
       .accountsStrict({
         raydiumClmmProgram: CLMM_PROGRAM_ID,
         signer: user,

@@ -65,8 +65,7 @@ describe('lp_deposit', () => {
     poolKeys = await getPoolKeys();
   }, 50000);
 
-  it('lp_deposit test', async () => {
-    // Add your test here.
+  async function simulateSwapAndDeposit(overrides?: { quotedMode?: number; quotedSqrtPriceX64?: anchor.BN }) {
     console.log('userWallet', userWallet.publicKey.toBase58());
     const { tickLower, tickUpper } = getTickLowerAndUpper(poolKeys, startPrice, endPrice);
     const poolProgramId = new PublicKey(poolKeys.programId);
@@ -176,6 +175,7 @@ describe('lp_deposit', () => {
     const amount0In = isMintA ? new BN(deposit_amount) : new BN(0);
     const amount1In = !isMintA ? new BN(deposit_amount) : new BN(0);
     const swapInputIsToken0 = res.swapDirection === ZapSwapDirection.AtoB;
+    const quotedSqrtPriceX64 = overrides?.quotedSqrtPriceX64 ?? new BN(computePool.sqrtPriceX64.toString());
     // returnMint 可选：传入则会在链上把剩余统一换回该 mint；不传则不做剩余兑换
     const returnMint = deposit_token_mint;
 
@@ -186,6 +186,8 @@ describe('lp_deposit', () => {
         returnMint,
         tickLower,
         tickUpper,
+        overrides?.quotedMode ?? res.quotedMode,
+        quotedSqrtPriceX64,
         slippage,
         res.swapAmountIN,
         res.swapMinOut,
@@ -255,6 +257,26 @@ describe('lp_deposit', () => {
       innerInstructions: true
     });
 
+    return {
+      transactionResult,
+      quotedMode: res.quotedMode
+    };
+  }
+
+  it('lp_deposit test', async () => {
+    const { transactionResult } = await simulateSwapAndDeposit();
+
     expect(transactionResult.value.err).toBeNull();
+  }, 500000);
+
+  it('rejects mismatched quoted mode', async () => {
+    const { quotedMode } = await simulateSwapAndDeposit();
+    const mismatchedQuotedMode = quotedMode === 0 ? 1 : 0;
+    const { transactionResult } = await simulateSwapAndDeposit({
+      quotedMode: mismatchedQuotedMode
+    });
+
+    expect(transactionResult.value.err).not.toBeNull();
+    expect((transactionResult.value.logs || []).join('\n')).toContain('Execution mode no longer matches quoted mode');
   }, 500000);
 });

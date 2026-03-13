@@ -7,7 +7,7 @@ use anchor_spl::token_2022::{self, Token2022};
 use anchor_spl::token_interface::{Mint, TokenAccount};
 use raydium_amm_v3::cpi as clmm_cpi;
 use raydium_amm_v3::cpi::accounts as clmm_accounts;
-use raydium_amm_v3::libraries::{get_sqrt_price_at_tick, liquidity_math};
+use raydium_amm_v3::libraries::{get_sqrt_price_at_tick, liquidity_math, U256};
 use raydium_amm_v3::program::AmmV3;
 use raydium_amm_v3::states::{AmmConfig, ObservationState, PoolState};
 
@@ -140,6 +140,77 @@ pub struct ZapPlan<'info> {
     pub computed_liquidity: u128,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum QuotedZapMode {
+    InRange = 0,
+    OutOfRangeToken0Only = 1,
+    OutOfRangeToken1Only = 2,
+}
+
+impl QuotedZapMode {
+    fn try_from_u8(value: u8) -> Result<Self> {
+        match value {
+            0 => Ok(Self::InRange),
+            1 => Ok(Self::OutOfRangeToken0Only),
+            2 => Ok(Self::OutOfRangeToken1Only),
+            _ => err!(LpDepositError::InvalidQuotedMode),
+        }
+    }
+}
+
+fn determine_zap_mode(
+    tick_lower_index: i32,
+    tick_upper_index: i32,
+    current_sqrt_price_x64: u128,
+) -> Result<QuotedZapMode> {
+    let sa = get_sqrt_price_at_tick(tick_lower_index)?;
+    let sb = get_sqrt_price_at_tick(tick_upper_index)?;
+
+    if current_sqrt_price_x64 <= sa {
+        Ok(QuotedZapMode::OutOfRangeToken0Only)
+    } else if current_sqrt_price_x64 >= sb {
+        Ok(QuotedZapMode::OutOfRangeToken1Only)
+    } else {
+        Ok(QuotedZapMode::InRange)
+    }
+}
+
+fn validate_quoted_mode_and_price(
+    tick_lower_index: i32,
+    tick_upper_index: i32,
+    current_sqrt_price_x64: u128,
+    quoted_mode: u8,
+    quoted_sqrt_price_x64: u128,
+    slippage_bps: u16,
+) -> Result<QuotedZapMode> {
+    validate_price_floor_from_quote(current_sqrt_price_x64, quoted_sqrt_price_x64, slippage_bps)?;
+
+    let quoted_mode = QuotedZapMode::try_from_u8(quoted_mode)?;
+    let actual_mode = determine_zap_mode(
+        tick_lower_index,
+        tick_upper_index,
+        current_sqrt_price_x64,
+    )?;
+    require!(actual_mode == quoted_mode, LpDepositError::QuotedModeMismatch);
+    Ok(actual_mode)
+}
+
+pub(crate) fn validate_price_floor_from_quote(
+    current_sqrt_price_x64: u128,
+    quoted_sqrt_price_x64: u128,
+    slippage_bps: u16,
+) -> Result<()> {
+    require!(slippage_bps <= 10_000, LpDepositError::InvalidSlippage);
+
+    let current_price_q64 = (U256::from(current_sqrt_price_x64) * U256::from(current_sqrt_price_x64)) >> 64;
+    let quoted_price_q64 = (U256::from(quoted_sqrt_price_x64) * U256::from(quoted_sqrt_price_x64)) >> 64;
+    let lhs = current_price_q64 * U256::from(10_000u128);
+    let rhs = quoted_price_q64 * U256::from(10_000u128 - slippage_bps as u128);
+    require!(lhs >= rhs, LpDepositError::QuotedPriceBelowMinimum);
+    Ok(())
+}
+
 pub fn prepare_zap_plan_and_swap_if_needed<'info>(
     accounts: &mut dyn ZapCommonAccounts<'info>,
     remaining_accounts: &'info [AccountInfo<'info>],
@@ -148,6 +219,8 @@ pub fn prepare_zap_plan_and_swap_if_needed<'info>(
     return_mint: Option<Pubkey>,
     tick_lower_index: i32,
     tick_upper_index: i32,
+    quoted_mode: u8,
+    quoted_sqrt_price_x64: u128,
     slippage_bps: u16,
     swap_amount_in: u64,
     swap_min_out: u64,
@@ -171,55 +244,21 @@ pub fn prepare_zap_plan_and_swap_if_needed<'info>(
     }
     require!(slippage_bps < 5_000, LpDepositError::InvalidSlippage);
 
-    // 上链执行时如果价格跑出区间：允许“单边投入”，并由合约自动把不需要的一侧换成需要的一侧（最多一次 swap）。
-    // - sp <= sa：区间在现价上方 → 只需要 token0 → 若 amount_1_in>0，自动执行 token1->token0 全额兑换
-    // - sp >= sb：区间在现价下方 → 只需要 token1 → 若 amount_0_in>0，自动执行 token0->token1 全额兑换
-    // - sa < sp < sb：区间跨现价 → 走链下 plan（swap_amount_in/min_out/方向）
+    // 严格报价模式：
+    // - 链下 plan 决定本次应处于哪一种 zap mode
+    // - 上链执行时只做校验，不再根据执行时价格自动 fallback/override plan
     let (sqrt_price_x64_now, tick_spacing) = {
         let pool_state = accounts.pool_state().load()?;
         (pool_state.sqrt_price_x64, pool_state.tick_spacing)
     };
-    let sa = get_sqrt_price_at_tick(tick_lower_index)?;
-    let sb = get_sqrt_price_at_tick(tick_upper_index)?;
-
-    // 最终实际执行的 swap（可能来自链下 plan，也可能因“出区间”被合约覆盖）
-    let trade_fee_rate = accounts.amm_config().trade_fee_rate;
-    let mut exec_swap_amount_in = swap_amount_in;
-    let mut exec_swap_min_out = swap_min_out;
-    let mut exec_swap_input_is_token0 = swap_input_is_token0;
-
-    let out_of_range = sqrt_price_x64_now <= sa || sqrt_price_x64_now >= sb;
-    if sqrt_price_x64_now <= sa {
-        // 只需要 token0：把 token1 全换成 token0
-        exec_swap_input_is_token0 = false;
-        exec_swap_amount_in = amount_1_in;
-        exec_swap_min_out = if exec_swap_amount_in > 0 {
-            utils::calc_min_amount_out(
-                exec_swap_amount_in,
-                exec_swap_input_is_token0,
-                sqrt_price_x64_now,
-                slippage_bps,
-                trade_fee_rate,
-            )?
-        } else {
-            0
-        };
-    } else if sqrt_price_x64_now >= sb {
-        // 只需要 token1：把 token0 全换成 token1
-        exec_swap_input_is_token0 = true;
-        exec_swap_amount_in = amount_0_in;
-        exec_swap_min_out = if exec_swap_amount_in > 0 {
-            utils::calc_min_amount_out(
-                exec_swap_amount_in,
-                exec_swap_input_is_token0,
-                sqrt_price_x64_now,
-                slippage_bps,
-                trade_fee_rate,
-            )?
-        } else {
-            0
-        };
-    }
+    let quoted_mode = validate_quoted_mode_and_price(
+        tick_lower_index,
+        tick_upper_index,
+        sqrt_price_x64_now,
+        quoted_mode,
+        quoted_sqrt_price_x64,
+        slippage_bps,
+    )?;
 
     let balance_0_before = accounts.signer_token0_account().amount;
     let balance_1_before = accounts.signer_token1_account().amount;
@@ -234,21 +273,32 @@ pub fn prepare_zap_plan_and_swap_if_needed<'info>(
         LpDepositError::InsufficientBalance
     );
 
-    // 仅在“区间跨现价”时校验链下 plan（出区间时 swap 会被合约覆盖）
-    if !out_of_range {
-        // swap_in 不能超过输入预算；swap=0 时 min_out 必须为 0
-        if swap_amount_in == 0 {
-            require!(swap_min_out == 0, LpDepositError::InvalidDepositAmount);
-        } else if swap_input_is_token0 {
-            require!(
-                swap_amount_in <= amount_0_in,
-                LpDepositError::InvalidDepositAmount
-            );
-        } else {
-            require!(
-                swap_amount_in <= amount_1_in,
-                LpDepositError::InvalidDepositAmount
-            );
+    // 固定 quote 校验：任何模式下都不再允许链上重写 swap plan。
+    if swap_amount_in == 0 {
+        require!(swap_min_out == 0, LpDepositError::InvalidDepositAmount);
+    } else if swap_input_is_token0 {
+        require!(
+            swap_amount_in <= amount_0_in,
+            LpDepositError::InvalidDepositAmount
+        );
+    } else {
+        require!(
+            swap_amount_in <= amount_1_in,
+            LpDepositError::InvalidDepositAmount
+        );
+    }
+
+    match quoted_mode {
+        QuotedZapMode::InRange => {}
+        QuotedZapMode::OutOfRangeToken0Only => {
+            if swap_amount_in > 0 {
+                require!(!swap_input_is_token0, LpDepositError::InvalidDepositAmount);
+            }
+        }
+        QuotedZapMode::OutOfRangeToken1Only => {
+            if swap_amount_in > 0 {
+                require!(swap_input_is_token0, LpDepositError::InvalidDepositAmount);
+            }
         }
     }
 
@@ -267,13 +317,13 @@ pub fn prepare_zap_plan_and_swap_if_needed<'info>(
     let balance_0_pre_cpi: u64;
     let balance_1_pre_cpi: u64;
 
-    if exec_swap_amount_in > 0 {
+    if swap_amount_in > 0 {
         swap_v2_common(
             accounts,
-            exec_swap_amount_in,
-            exec_swap_min_out,
+            swap_amount_in,
+            swap_min_out,
             0,
-            exec_swap_input_is_token0,
+            swap_input_is_token0,
             swap_remaining_slice.to_vec(),
         )?;
 
@@ -283,7 +333,7 @@ pub fn prepare_zap_plan_and_swap_if_needed<'info>(
         let balance_0_after_swap = accounts.signer_token0_account().amount;
         let balance_1_after_swap = accounts.signer_token1_account().amount;
 
-        let spent_in = if exec_swap_input_is_token0 {
+        let spent_in = if swap_input_is_token0 {
             balance_0_before
                 .checked_sub(balance_0_after_swap)
                 .ok_or(LpDepositError::MathOverflow)?
@@ -292,7 +342,7 @@ pub fn prepare_zap_plan_and_swap_if_needed<'info>(
                 .checked_sub(balance_1_after_swap)
                 .ok_or(LpDepositError::MathOverflow)?
         };
-        let amount_out_after = if exec_swap_input_is_token0 {
+        let amount_out_after = if swap_input_is_token0 {
             balance_1_after_swap
                 .checked_sub(balance_1_before)
                 .ok_or(LpDepositError::MathOverflow)?
@@ -303,7 +353,7 @@ pub fn prepare_zap_plan_and_swap_if_needed<'info>(
         };
 
         // 若 token 有转账费，实际扣款可能 > swap_amount_in；必须确保不超过用户输入预算
-        if exec_swap_input_is_token0 {
+        if swap_input_is_token0 {
             require!(
                 spent_in <= amount_0_in,
                 LpDepositError::InvalidDepositAmount
@@ -316,7 +366,7 @@ pub fn prepare_zap_plan_and_swap_if_needed<'info>(
         }
 
         // 计算 CPI 可用的 max（= 输入预算经过 swap 后的可用额度）
-        if exec_swap_input_is_token0 {
+        if swap_input_is_token0 {
             // token0 -> token1：token0 减少 swap_in，token1 增加 out
             amount_0_max = amount_0_in
                 .checked_sub(spent_in)
@@ -462,6 +512,8 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
             let mut kept_other = false;
             if leftover_1 > 0 {
                 let before0 = accounts.signer_token0_account().amount;
+                // refund swap 发生在主 swap / 加流动性之后，价格状态已被前序步骤合法更新；
+                // 这里故意以当前池价作为结算锚点，而不复用主 swap 的链下报价锚点。
                 let sqrt_price_x64 = {
                     let pool_state = accounts.pool_state().load()?;
                     pool_state.sqrt_price_x64
@@ -541,6 +593,8 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
             let mut kept_other = false;
             if leftover_0 > 0 {
                 let before1 = accounts.signer_token1_account().amount;
+                // refund swap 发生在主 swap / 加流动性之后，价格状态已被前序步骤合法更新；
+                // 这里故意以当前池价作为结算锚点，而不复用主 swap 的链下报价锚点。
                 let sqrt_price_x64 = {
                     let pool_state = accounts.pool_state().load()?;
                     pool_state.sqrt_price_x64
@@ -968,4 +1022,69 @@ fn transfer_token_common_accounts<'info>(
         amount,
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use raydium_amm_v3::libraries::get_sqrt_price_at_tick;
+
+    #[test]
+    fn validate_quoted_mode_accepts_matching_in_range_price() {
+        let tick_lower_index = -100;
+        let tick_upper_index = 100;
+        let current_sqrt_price_x64 = get_sqrt_price_at_tick(0).unwrap();
+        let quoted_sqrt_price_x64 = get_sqrt_price_at_tick(0).unwrap();
+
+        let result = validate_quoted_mode_and_price(
+            tick_lower_index,
+            tick_upper_index,
+            current_sqrt_price_x64,
+            QuotedZapMode::InRange as u8,
+            quoted_sqrt_price_x64,
+            100,
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_quoted_mode_rejects_execution_mode_mismatch() {
+        let tick_lower_index = -100;
+        let tick_upper_index = 100;
+        let current_sqrt_price_x64 = get_sqrt_price_at_tick(-120).unwrap();
+        let quoted_sqrt_price_x64 = get_sqrt_price_at_tick(0).unwrap();
+
+        let err = validate_quoted_mode_and_price(
+            tick_lower_index,
+            tick_upper_index,
+            current_sqrt_price_x64,
+            QuotedZapMode::InRange as u8,
+            quoted_sqrt_price_x64,
+            2_000,
+        )
+        .unwrap_err();
+
+        assert_eq!(err, LpDepositError::QuotedModeMismatch.into());
+    }
+
+    #[test]
+    fn validate_quoted_mode_rejects_price_below_floor() {
+        let tick_lower_index = -100;
+        let tick_upper_index = 100;
+        let quoted_sqrt_price_x64 = get_sqrt_price_at_tick(0).unwrap();
+        let current_sqrt_price_x64 = get_sqrt_price_at_tick(-600).unwrap();
+
+        let err = validate_quoted_mode_and_price(
+            tick_lower_index,
+            tick_upper_index,
+            current_sqrt_price_x64,
+            QuotedZapMode::OutOfRangeToken0Only as u8,
+            quoted_sqrt_price_x64,
+            100,
+        )
+        .unwrap_err();
+
+        assert_eq!(err, LpDepositError::QuotedPriceBelowMinimum.into());
+    }
 }

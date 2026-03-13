@@ -5,6 +5,10 @@ use crate::{
     SecurityConfigUpdated, MAX_ALLOWED_POOLS, MAX_FEE_OWNERS, SECURITY_CONFIG_SEED,
 };
 
+fn event_count(len: usize) -> Result<u32> {
+    u32::try_from(len).map_err(|_| error!(LpDepositError::MathOverflow))
+}
+
 pub fn init_security_config(
     ctx: Context<InitSecurityConfig>,
     pools: Vec<Pubkey>,
@@ -69,12 +73,13 @@ pub fn close_security_config(ctx: Context<CloseSecurityConfig>) -> Result<()> {
     emit!(SecurityConfigClosed {
         authority: cfg.authority,
         receiver: ctx.accounts.receiver.key(),
-        pools_count: cfg.pools.len(),
-        fee_owners_count: cfg.fee_owners.len(),
+        pools_count: event_count(cfg.pools.len())?,
+        fee_owners_count: event_count(cfg.fee_owners.len())?,
     });
 
     Ok(())
 }
+
 #[derive(Accounts)]
 pub struct InitSecurityConfig<'info> {
     #[account(mut)]

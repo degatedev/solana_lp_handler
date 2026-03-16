@@ -1,5 +1,5 @@
-use anchor_lang::prelude::*;
 use anchor_lang::prelude::InterfaceAccount;
+use anchor_lang::prelude::*;
 use anchor_spl::token::Token;
 use anchor_spl::token_2022::spl_token_2022::extension::{
     transfer_fee::{TransferFeeConfig, MAX_FEE_BASIS_POINTS},
@@ -9,6 +9,21 @@ use anchor_spl::token_interface::Mint;
 use raydium_amm_v3::libraries::{liquidity_math, U256};
 
 use crate::LpDepositError;
+
+fn calculate_transfer_fee_from_config(
+    transfer_fee_config: &TransferFeeConfig,
+    epoch: u64,
+    pre_fee_amount: u64,
+) -> Result<u64> {
+    let transfer_fee = transfer_fee_config.get_epoch_fee(epoch);
+    if u16::from(transfer_fee.transfer_fee_basis_points) == MAX_FEE_BASIS_POINTS {
+        Ok(u64::from(transfer_fee.maximum_fee))
+    } else {
+        transfer_fee_config
+            .calculate_epoch_fee(epoch, pre_fee_amount)
+            .ok_or(LpDepositError::MathOverflow.into())
+    }
+}
 
 /// `require!` + 可选日志（不分配 heap）。
 ///
@@ -163,14 +178,7 @@ pub fn get_transfer_fee_from_mint_info(mint_info: AccountInfo, pre_fee_amount: u
 
     let fee = if let Ok(transfer_fee_config) = mint.get_extension::<TransferFeeConfig>() {
         let epoch = Clock::get()?.epoch;
-        let transfer_fee = transfer_fee_config.get_epoch_fee(epoch);
-        if u16::from(transfer_fee.transfer_fee_basis_points) == MAX_FEE_BASIS_POINTS {
-            u64::from(transfer_fee.maximum_fee)
-        } else {
-            transfer_fee_config
-                .calculate_epoch_fee(epoch, pre_fee_amount)
-                .unwrap_or(0)
-        }
+        calculate_transfer_fee_from_config(transfer_fee_config, epoch, pre_fee_amount)?
     } else {
         0
     };
@@ -188,6 +196,9 @@ pub fn get_transfer_fee_for_amount(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anchor_spl::token_2022::spl_token_2022::extension::transfer_fee::{
+        TransferFee, TransferFeeConfig,
+    };
 
     #[test]
     fn spl_mint_has_zero_transfer_fee() {
@@ -206,7 +217,41 @@ mod tests {
             0,
         );
 
-        assert_eq!(get_transfer_fee_from_mint_info(mint_info, 1_000).unwrap(), 0);
+        assert_eq!(
+            get_transfer_fee_from_mint_info(mint_info, 1_000).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn transfer_fee_config_errors_when_epoch_fee_cannot_be_derived() {
+        let result = calculate_transfer_fee_from_config(
+            &test_transfer_fee_config(u16::MAX, u64::MAX),
+            0,
+            u64::MAX,
+        );
+        assert!(result.is_err());
+    }
+
+    fn test_transfer_fee_config(
+        transfer_fee_basis_points: u16,
+        maximum_fee: u64,
+    ) -> TransferFeeConfig {
+        TransferFeeConfig {
+            transfer_fee_config_authority: Default::default(),
+            withdraw_withheld_authority: Default::default(),
+            withheld_amount: 0u64.into(),
+            older_transfer_fee: TransferFee {
+                epoch: 0u64.into(),
+                maximum_fee: maximum_fee.into(),
+                transfer_fee_basis_points: transfer_fee_basis_points.into(),
+            },
+            newer_transfer_fee: TransferFee {
+                epoch: 0u64.into(),
+                maximum_fee: maximum_fee.into(),
+                transfer_fee_basis_points: transfer_fee_basis_points.into(),
+            },
+        }
     }
 }
 

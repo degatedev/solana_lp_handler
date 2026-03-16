@@ -1,6 +1,7 @@
 import fs from 'node:fs';
-import { execSync } from './help';
+import { execSync, spawnSyncOptions, userWallet } from './help';
 import { Keypair } from '@solana/web3.js';
+import { buildAnchorBuildEnv } from './deploy_config';
 
 export const deploy = async () => {
   console.log('生成合约id');
@@ -20,7 +21,11 @@ export const deploy = async () => {
   execSync('anchor', ['keys', 'sync']);
   console.log('合约ID同步成功');
   console.log('开始构建合约...');
-  execSync('anchor', ['build']);
+  const buildEnv = buildAnchorBuildEnv(userWallet.publicKey.toBase58());
+  execSync('anchor', ['build'], {
+    ...spawnSyncOptions,
+    env: buildEnv
+  });
   console.log('合约构建成功');
   console.log('开始部署合约...');
   execSync('anchor', ['deploy', '--provider.cluster', 'mainnet']);

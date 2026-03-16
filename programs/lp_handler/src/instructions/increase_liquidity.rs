@@ -6,7 +6,7 @@ use raydium_amm_v3::states::{
     AmmConfig, ObservationState, PersonalPositionState, PoolState, TickArrayState,
 };
 
-use crate::SECURITY_CONFIG_SEED;
+use crate::{LpDepositError, SECURITY_CONFIG_SEED};
 
 use anchor_spl::associated_token::AssociatedToken;
 use anchor_spl::memo::Memo;
@@ -191,6 +191,13 @@ pub fn increase_liquidity<'a, 'b, 'c: 'info, 'info>(
     swap_min_out: u64,
     swap_input_is_token0: bool,
 ) -> Result<()> {
+    validate_position_ticks_match(
+        tick_lower_index,
+        tick_upper_index,
+        ctx.accounts.personal_position.tick_lower_index,
+        ctx.accounts.personal_position.tick_upper_index,
+    )?;
+
     let plan = zap_common::prepare_zap_plan_and_swap_if_needed(
         &mut *ctx.accounts,
         ctx.remaining_accounts,
@@ -232,10 +239,28 @@ pub fn increase_liquidity<'a, 'b, 'c: 'info, 'info>(
         plan.balance_1_pre_cpi,
         plan.amount_0_max,
         plan.amount_1_max,
-        plan.swap_remaining,
+        plan.cleanup_swap_remaining_input_token0,
+        plan.cleanup_swap_remaining_input_token1,
         position_nft_mint,
     )?;
 
+    Ok(())
+}
+
+fn validate_position_ticks_match(
+    tick_lower_index: i32,
+    tick_upper_index: i32,
+    expected_tick_lower_index: i32,
+    expected_tick_upper_index: i32,
+) -> Result<()> {
+    require!(
+        tick_lower_index == expected_tick_lower_index,
+        LpDepositError::InvalidTickRange
+    );
+    require!(
+        tick_upper_index == expected_tick_upper_index,
+        LpDepositError::InvalidTickRange
+    );
     Ok(())
 }
 
@@ -275,4 +300,20 @@ fn increase_liquidity_v2<'a, 'b, 'c: 'info, 'info>(
     clmm_cpi::increase_liquidity_v2(cpi_ctx, liquidity, amount_0_max, amount_1_max, base_flag)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_tick_mismatch_for_existing_position() {
+        let err = validate_position_ticks_match(-10, 10, -20, 10).unwrap_err();
+        assert_eq!(err, LpDepositError::InvalidTickRange.into());
+    }
+
+    #[test]
+    fn accepts_matching_ticks_for_existing_position() {
+        assert!(validate_position_ticks_match(-10, 10, -10, 10).is_ok());
+    }
 }

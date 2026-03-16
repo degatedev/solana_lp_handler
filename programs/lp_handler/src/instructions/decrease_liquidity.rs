@@ -25,7 +25,7 @@ use crate::require_log;
   quoted_sqrt_price_x64: u128,
   slippage_bps: u16, // 滑点，单位为基点 (1 bps = 0.01%)
   fee_percent: u16,
-  convert_to_usdc: bool,
+  convert_to_target_mint: bool,
 )]
 pub struct DecreaseLiquidity<'info> {
     // ========== 公共账户 ==========
@@ -204,8 +204,18 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
     quoted_sqrt_price_x64: u128,
     slippage_bps: u16,
     fee_percent: u16,
-    convert_to_usdc: bool,
+    convert_to_target_mint: bool,
 ) -> Result<()> {
+    validate_fee_token_account_keys(
+        ctx.accounts.fee_owner.key(),
+        ctx.accounts.fee_token0_account.key(),
+        ctx.accounts.fee_token1_account.key(),
+        ctx.accounts.vault_0_mint.key(),
+        *ctx.accounts.vault_0_mint.to_account_info().owner,
+        ctx.accounts.vault_1_mint.key(),
+        *ctx.accounts.vault_1_mint.to_account_info().owner,
+    )?;
+
     // 校验手续费比例，最大 100%（10000 bps）
     require_log!(
         fee_percent <= 10_000,
@@ -257,13 +267,25 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             (pool_state.tick_current, pool_state.sqrt_price_x64)
         };
 
-        utils::calculate_principal_amounts_for_liquidity(
+        let (principal_expected_0, principal_expected_1) = utils::calculate_principal_amounts_for_liquidity(
             tick_current_before,
             sqrt_price_x64_before,
             ctx.accounts.personal_position.tick_lower_index,
             ctx.accounts.personal_position.tick_upper_index,
             liquidity,
-        )?
+        )?;
+        let principal_transfer_fee_0 =
+            utils::get_transfer_fee_for_amount(ctx.accounts.vault_0_mint.as_ref(), principal_expected_0)?;
+        let principal_transfer_fee_1 =
+            utils::get_transfer_fee_for_amount(ctx.accounts.vault_1_mint.as_ref(), principal_expected_1)?;
+        (
+            principal_expected_0
+                .checked_sub(principal_transfer_fee_0)
+                .ok_or(LpDepositError::MathOverflow)?,
+            principal_expected_1
+                .checked_sub(principal_transfer_fee_1)
+                .ok_or(LpDepositError::MathOverflow)?,
+        )
     };
     cpi_decrease_liquidity_v2(
         &ctx,
@@ -287,11 +309,7 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
         .checked_sub(signer_token1_balance_before)
         .ok_or(LpDepositError::MathOverflow)?;
 
-    // 所有情况：如果本次操作没有带来任何余额变化（两边增量都为 0），直接失败
-    require_log!(
-        signer_token0_amount > 0 || signer_token1_amount > 0,
-        LpDepositError::NoBalanceChange
-    );
+    should_require_balance_change(liquidity, signer_token0_amount, signer_token1_amount)?;
 
     // LPH-004: 避免用 saturating_sub 静默吞掉 "actual < principal" 的边界状态。
     // 语义保持不变：reward 只取正向增量，不对“本金缺口/负收益”计提手续费；
@@ -327,7 +345,7 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
     let mut fee_due_0: u64 = 0;
     let mut fee_due_1: u64 = 0;
 
-    if convert_to_usdc {
+    if convert_to_target_mint {
         // 兑换到目标币种后再扣手续费（手续费从“最终到手的 reward”中抽取，且用目标币种结算）
         let target_is_token0 = ctx.accounts.vault_0_mint.key() == swap_to_token_mint;
         // 合并两段 swap，把“other token”一次性换成目标币种；
@@ -382,6 +400,7 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             .checked_add(principal_other_in)
             .ok_or(LpDepositError::MathOverflow)?;
         let mut total_out_in_target: u64 = 0;
+        let mut skipped_claim_only_dust_transfer: Option<u64> = None;
         if total_other_in > 0 {
             let swap_other_amount_threshold = calc_swap_threshold_from_anchor_price(
                 total_other_in,
@@ -391,44 +410,40 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
                 ctx.accounts.amm_config.trade_fee_rate,
             )?;
 
-            // dust 处理：
-            // - 合并 swap 后，若同时包含 principal，则不能把输入直接转给 fee（会误伤本金）
-            // - 但在“纯领取奖励”（principal_other_in==0）场景下，可以保留原逻辑：当 swap_other_amount_threshold 小于MIN_USDC_SWAP_AMOUNT 时直接把 reward_other_in 转给 fee
-            let is_usdc = swap_to_token_mint == crate::consts::USDC_MIN;
-
-            let min = if is_usdc {
-                swap_other_amount_threshold
-            } else {
-                total_other_in
-            };
-
-            if principal_other_in == 0 && min < crate::consts::MIN_USDC_SWAP_AMOUNT {
+            if should_skip_claim_only_dust_swap(
+                principal_other_in,
+                swap_other_amount_threshold,
+            ) {
                 msg!(
-                    "skip reward swap (claim-only dust): below MIN_USDC_SWAP_AMOUNT, transfer input to fee"
+                    "skip reward swap (claim-only dust): below MIN_USDC_SWAP_AMOUNT, transfer full reward input to fee"
                 );
-                zap_common::transfer_fee(
-                    &ctx.accounts.signer,
-                    &ctx.accounts.fee_owner,
-                    if input_is_token0 {
-                        &ctx.accounts.signer_token0_account
-                    } else {
-                        &ctx.accounts.signer_token1_account
-                    },
-                    if input_is_token0 {
-                        &ctx.accounts.fee_token0_account
-                    } else {
-                        &ctx.accounts.fee_token1_account
-                    },
-                    if input_is_token0 {
-                        Some(&ctx.accounts.vault_0_mint)
-                    } else {
-                        Some(&ctx.accounts.vault_1_mint)
-                    },
-                    &ctx.accounts.token_program,
-                    Some(&ctx.accounts.token_program_2022),
-                    &ctx.accounts.system_program,
-                    total_other_in, // == reward_other_in
-                )?;
+                let dust_transfer_amount = calc_dust_transfer_amount(reward_other_in);
+                if dust_transfer_amount > 0 {
+                    zap_common::transfer_fee(
+                        &ctx.accounts.signer,
+                        &ctx.accounts.fee_owner,
+                        if input_is_token0 {
+                            &ctx.accounts.signer_token0_account
+                        } else {
+                            &ctx.accounts.signer_token1_account
+                        },
+                        if input_is_token0 {
+                            &ctx.accounts.fee_token0_account
+                        } else {
+                            &ctx.accounts.fee_token1_account
+                        },
+                        if input_is_token0 {
+                            Some(&ctx.accounts.vault_0_mint)
+                        } else {
+                            Some(&ctx.accounts.vault_1_mint)
+                        },
+                        &ctx.accounts.token_program,
+                        Some(&ctx.accounts.token_program_2022),
+                        &ctx.accounts.system_program,
+                        dust_transfer_amount,
+                    )?;
+                }
+                skipped_claim_only_dust_transfer = Some(dust_transfer_amount);
             } else {
                 let current_sqrt_price_x64 = {
                     let pool_state = ctx.accounts.pool_state.load()?;
@@ -460,133 +475,156 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             }
         }
 
-        // 2) 近似拆分 swap 输出：reward_out ≈ total_out * reward_other_in / total_other_in
-        let reward_out_in_target_est = if total_other_in == 0 || reward_other_in == 0 {
-            0u64
+        if let Some(dust_transfer_amount) = skipped_claim_only_dust_transfer {
+            emit!(LpHandlerDecreaseLiquidityEvent {
+                pool: ctx.accounts.pool_state.key(),
+                token0_mint: ctx.accounts.vault_0_mint.key(),
+                token1_mint: ctx.accounts.vault_1_mint.key(),
+                settle_mint: None,
+                principal_pre_0: principal_expected_0,
+                principal_pre_1: principal_expected_1,
+                reward_pre_fee_0: reward_gross_0,
+                reward_pre_fee_1: reward_gross_1,
+                principal_settled_0: principal_expected_0,
+                principal_settled_1: principal_expected_1,
+                reward_settled_0: if input_is_token0 { 0 } else { reward_gross_0 },
+                reward_settled_1: if input_is_token0 { reward_gross_1 } else { 0 },
+                fee_settled_0: if input_is_token0 {
+                    dust_transfer_amount
+                } else {
+                    0
+                },
+                fee_settled_1: if input_is_token0 {
+                    0
+                } else {
+                    dust_transfer_amount
+                },
+            });
         } else {
-            let num = (total_out_in_target as u128)
-                .checked_mul(reward_other_in as u128)
-                .ok_or(LpDepositError::MathOverflow)?;
-            let den = total_other_in as u128;
-            // LPH-008: 避免整数除法向下截断的系统性偏差；采用“四舍五入到最近整数”。
-            // 同时避免 u128 -> u64 的 `as` 静默截断：改用 try_into() 显式溢出报错。
-            let quotient = num.checked_div(den).ok_or(LpDepositError::MathOverflow)?;
-            let remainder = num.checked_rem(den).ok_or(LpDepositError::MathOverflow)?;
-            let rounded = if remainder
-                .checked_mul(2)
-                .ok_or(LpDepositError::MathOverflow)?
-                >= den
-            {
-                quotient
-                    .checked_add(1)
-                    .ok_or(LpDepositError::MathOverflow)?
+            // 2) 近似拆分 swap 输出：reward_out ≈ total_out * reward_other_in / total_other_in
+            let reward_out_in_target_est = if total_other_in == 0 || reward_other_in == 0 {
+                0u64
             } else {
-                quotient
+                let num = (total_out_in_target as u128)
+                    .checked_mul(reward_other_in as u128)
+                    .ok_or(LpDepositError::MathOverflow)?;
+                let den = total_other_in as u128;
+                // LPH-008: 避免整数除法向下截断的系统性偏差；采用“四舍五入到最近整数”。
+                let quotient = num.checked_div(den).ok_or(LpDepositError::MathOverflow)?;
+                let remainder = num.checked_rem(den).ok_or(LpDepositError::MathOverflow)?;
+                let rounded = if remainder
+                    .checked_mul(2)
+                    .ok_or(LpDepositError::MathOverflow)?
+                    >= den
+                {
+                    quotient
+                        .checked_add(1)
+                        .ok_or(LpDepositError::MathOverflow)?
+                } else {
+                    quotient
+                };
+                rounded
+                    .try_into()
+                    .map_err(|_| error!(LpDepositError::MathOverflow))?
             };
-            rounded
-                .try_into()
-                .map_err(|_| error!(LpDepositError::MathOverflow))?
-        };
-        let principal_out_in_target_est = total_out_in_target
-            .checked_sub(reward_out_in_target_est)
-            .ok_or(LpDepositError::MathOverflow)?;
-
-        // 3) fee 仍按 reward 口径计提（reward_direct + reward_out_est）
-        let reward_total_in_target = reward_target_direct
-            .checked_add(reward_out_in_target_est)
-            .ok_or(LpDepositError::MathOverflow)?;
-        let integrator_fee_target = reward_total_in_target
-            .checked_mul(fee_percent as u64)
-            .ok_or(LpDepositError::MathOverflow)?
-            .checked_div(10_000)
-            .ok_or(LpDepositError::MathOverflow)?;
-
-        if target_is_token0 {
-            fee_due_0 = integrator_fee_target;
-        } else {
-            fee_due_1 = integrator_fee_target;
-        }
-
-        // 非 wSOL 手续费：可以直接扣 token 给 fee_token_account。
-        // wSOL 手续费：必须收 SOL，因此不在这里扣，留到末尾统一 unwrap 后用 system transfer 支付。
-        let target_is_wsol = if target_is_token0 {
-            ctx.accounts.vault_0_mint.key() == anchor_spl::token::spl_token::native_mint::ID
-        } else {
-            ctx.accounts.vault_1_mint.key() == anchor_spl::token::spl_token::native_mint::ID
-        };
-        if !target_is_wsol {
-            zap_common::transfer_fee(
-                &ctx.accounts.signer,
-                &ctx.accounts.fee_owner,
-                if target_is_token0 {
-                    &ctx.accounts.signer_token0_account
-                } else {
-                    &ctx.accounts.signer_token1_account
-                },
-                if target_is_token0 {
-                    &ctx.accounts.fee_token0_account
-                } else {
-                    &ctx.accounts.fee_token1_account
-                },
-                if target_is_token0 {
-                    Some(&ctx.accounts.vault_0_mint)
-                } else {
-                    Some(&ctx.accounts.vault_1_mint)
-                },
-                &ctx.accounts.token_program,
-                Some(&ctx.accounts.token_program_2022),
-                &ctx.accounts.system_program,
-                integrator_fee_target,
-            )?;
-        }
-
-        // 事件按“兑换后”口径输出：只在目标币种上体现 principal/reward/fee，其它币种为 0
-        if target_is_token0 {
-            let principal_amount_0 = principal_expected_0
-                .checked_add(principal_out_in_target_est)
+            let principal_out_in_target_est = total_out_in_target
+                .checked_sub(reward_out_in_target_est)
                 .ok_or(LpDepositError::MathOverflow)?;
-            let reward_amount_0 = reward_total_in_target
-                .checked_sub(integrator_fee_target)
+
+            // 3) fee 仍按 reward 口径计提（reward_direct + reward_out_est）
+            let reward_total_in_target = reward_target_direct
+                .checked_add(reward_out_in_target_est)
                 .ok_or(LpDepositError::MathOverflow)?;
-            emit!(LpHandlerDecreaseLiquidityEvent {
-                pool: ctx.accounts.pool_state.key(),
-                token0_mint: ctx.accounts.vault_0_mint.key(),
-                token1_mint: ctx.accounts.vault_1_mint.key(),
-                settle_mint: Some(swap_to_token_mint),
-                principal_pre_0: principal_expected_0,
-                principal_pre_1: principal_expected_1,
-                reward_pre_fee_0: reward_gross_0,
-                reward_pre_fee_1: reward_gross_1,
-                principal_settled_0: principal_amount_0,
-                principal_settled_1: 0,
-                reward_settled_0: reward_amount_0,
-                reward_settled_1: 0,
-                fee_settled_0: integrator_fee_target,
-                fee_settled_1: 0,
-            });
-        } else {
-            let principal_amount_1 = principal_expected_1
-                .checked_add(principal_out_in_target_est)
+            let integrator_fee_target = reward_total_in_target
+                .checked_mul(fee_percent as u64)
+                .ok_or(LpDepositError::MathOverflow)?
+                .checked_div(10_000)
                 .ok_or(LpDepositError::MathOverflow)?;
-            let reward_amount_1 = reward_total_in_target
-                .checked_sub(integrator_fee_target)
-                .ok_or(LpDepositError::MathOverflow)?;
-            emit!(LpHandlerDecreaseLiquidityEvent {
-                pool: ctx.accounts.pool_state.key(),
-                token0_mint: ctx.accounts.vault_0_mint.key(),
-                token1_mint: ctx.accounts.vault_1_mint.key(),
-                settle_mint: Some(swap_to_token_mint),
-                principal_pre_0: principal_expected_0,
-                principal_pre_1: principal_expected_1,
-                reward_pre_fee_0: reward_gross_0,
-                reward_pre_fee_1: reward_gross_1,
-                principal_settled_0: 0,
-                principal_settled_1: principal_amount_1,
-                reward_settled_0: 0,
-                reward_settled_1: reward_amount_1,
-                fee_settled_0: 0,
-                fee_settled_1: integrator_fee_target,
-            });
+
+            if target_is_token0 {
+                fee_due_0 = integrator_fee_target;
+            } else {
+                fee_due_1 = integrator_fee_target;
+            }
+
+            let target_is_wsol = if target_is_token0 {
+                crate::consts::is_native_sol_mint(&ctx.accounts.vault_0_mint.key())
+            } else {
+                crate::consts::is_native_sol_mint(&ctx.accounts.vault_1_mint.key())
+            };
+            if !target_is_wsol {
+                zap_common::transfer_fee(
+                    &ctx.accounts.signer,
+                    &ctx.accounts.fee_owner,
+                    if target_is_token0 {
+                        &ctx.accounts.signer_token0_account
+                    } else {
+                        &ctx.accounts.signer_token1_account
+                    },
+                    if target_is_token0 {
+                        &ctx.accounts.fee_token0_account
+                    } else {
+                        &ctx.accounts.fee_token1_account
+                    },
+                    if target_is_token0 {
+                        Some(&ctx.accounts.vault_0_mint)
+                    } else {
+                        Some(&ctx.accounts.vault_1_mint)
+                    },
+                    &ctx.accounts.token_program,
+                    Some(&ctx.accounts.token_program_2022),
+                    &ctx.accounts.system_program,
+                    integrator_fee_target,
+                )?;
+            }
+
+            if target_is_token0 {
+                let principal_amount_0 = principal_expected_0
+                    .checked_add(principal_out_in_target_est)
+                    .ok_or(LpDepositError::MathOverflow)?;
+                let reward_amount_0 = reward_total_in_target
+                    .checked_sub(integrator_fee_target)
+                    .ok_or(LpDepositError::MathOverflow)?;
+                emit!(LpHandlerDecreaseLiquidityEvent {
+                    pool: ctx.accounts.pool_state.key(),
+                    token0_mint: ctx.accounts.vault_0_mint.key(),
+                    token1_mint: ctx.accounts.vault_1_mint.key(),
+                    settle_mint: Some(swap_to_token_mint),
+                    principal_pre_0: principal_expected_0,
+                    principal_pre_1: principal_expected_1,
+                    reward_pre_fee_0: reward_gross_0,
+                    reward_pre_fee_1: reward_gross_1,
+                    principal_settled_0: principal_amount_0,
+                    principal_settled_1: 0,
+                    reward_settled_0: reward_amount_0,
+                    reward_settled_1: 0,
+                    fee_settled_0: integrator_fee_target,
+                    fee_settled_1: 0,
+                });
+            } else {
+                let principal_amount_1 = principal_expected_1
+                    .checked_add(principal_out_in_target_est)
+                    .ok_or(LpDepositError::MathOverflow)?;
+                let reward_amount_1 = reward_total_in_target
+                    .checked_sub(integrator_fee_target)
+                    .ok_or(LpDepositError::MathOverflow)?;
+                emit!(LpHandlerDecreaseLiquidityEvent {
+                    pool: ctx.accounts.pool_state.key(),
+                    token0_mint: ctx.accounts.vault_0_mint.key(),
+                    token1_mint: ctx.accounts.vault_1_mint.key(),
+                    settle_mint: Some(swap_to_token_mint),
+                    principal_pre_0: principal_expected_0,
+                    principal_pre_1: principal_expected_1,
+                    reward_pre_fee_0: reward_gross_0,
+                    reward_pre_fee_1: reward_gross_1,
+                    principal_settled_0: 0,
+                    principal_settled_1: principal_amount_1,
+                    reward_settled_0: 0,
+                    reward_settled_1: reward_amount_1,
+                    fee_settled_0: 0,
+                    fee_settled_1: integrator_fee_target,
+                });
+            }
         }
         // wSOL unwrap / 手续费支付 / 转给 recipient 统一在函数末尾结算阶段处理。
     } else {
@@ -604,10 +642,8 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
         fee_due_0 = integrator_fee_0;
         fee_due_1 = integrator_fee_1;
 
-        let is_wsol_0 =
-            ctx.accounts.vault_0_mint.key() == anchor_spl::token::spl_token::native_mint::ID;
-        let is_wsol_1 =
-            ctx.accounts.vault_1_mint.key() == anchor_spl::token::spl_token::native_mint::ID;
+        let is_wsol_0 = crate::consts::is_native_sol_mint(&ctx.accounts.vault_0_mint.key());
+        let is_wsol_1 = crate::consts::is_native_sol_mint(&ctx.accounts.vault_1_mint.key());
 
         // 非 wSOL 手续费：直接扣 token 给 fee_token_account。
         // wSOL 手续费：必须收 SOL，因此不在这里扣，留到末尾统一 unwrap 后用 system transfer 支付。
@@ -697,10 +733,8 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
         });
 
     let recipient_is_signer = ctx.accounts.recipient.key() == ctx.accounts.signer.key();
-    let is_wsol_0 =
-        ctx.accounts.vault_0_mint.key() == anchor_spl::token::spl_token::native_mint::ID;
-    let is_wsol_1 =
-        ctx.accounts.vault_1_mint.key() == anchor_spl::token::spl_token::native_mint::ID;
+    let is_wsol_0 = crate::consts::is_native_sol_mint(&ctx.accounts.vault_0_mint.key());
+    let is_wsol_1 = crate::consts::is_native_sol_mint(&ctx.accounts.vault_1_mint.key());
 
     // token0 结算
     if net0 > 0 {
@@ -924,9 +958,69 @@ fn calc_swap_threshold_from_anchor_price(
     )
 }
 
+fn should_require_balance_change(
+    liquidity: u128,
+    signer_token0_amount: u64,
+    signer_token1_amount: u64,
+) -> Result<()> {
+    if liquidity > 0 {
+        require_log!(
+            signer_token0_amount > 0 || signer_token1_amount > 0,
+            LpDepositError::NoBalanceChange
+        );
+    }
+    Ok(())
+}
+
+fn calc_dust_transfer_amount(reward_amount: u64) -> u64 {
+    reward_amount
+}
+
+fn should_skip_claim_only_dust_swap(
+    principal_other_in: u64,
+    swap_other_amount_threshold: u64,
+) -> bool {
+    principal_other_in == 0 && swap_other_amount_threshold < crate::consts::MIN_USDC_SWAP_AMOUNT
+}
+
+fn validate_fee_token_account_keys(
+    fee_owner: Pubkey,
+    fee_token0_account: Pubkey,
+    fee_token1_account: Pubkey,
+    vault_0_mint: Pubkey,
+    vault_0_token_program: Pubkey,
+    vault_1_mint: Pubkey,
+    vault_1_token_program: Pubkey,
+) -> Result<()> {
+    let expected_fee_token0 = utils::derive_ata_address(
+        &fee_owner,
+        &vault_0_mint,
+        &vault_0_token_program,
+        &anchor_spl::associated_token::ID,
+    );
+    require!(
+        fee_token0_account == expected_fee_token0,
+        LpDepositError::InvalidFeeTokenAccount
+    );
+
+    let expected_fee_token1 = utils::derive_ata_address(
+        &fee_owner,
+        &vault_1_mint,
+        &vault_1_token_program,
+        &anchor_spl::associated_token::ID,
+    );
+    require!(
+        fee_token1_account == expected_fee_token1,
+        LpDepositError::InvalidFeeTokenAccount
+    );
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anchor_spl::{token, token_2022};
     use raydium_amm_v3::libraries::get_sqrt_price_at_tick;
 
     #[test]
@@ -956,5 +1050,63 @@ mod tests {
         .unwrap();
 
         assert_ne!(anchored, current);
+    }
+
+    #[test]
+    fn reward_only_claim_does_not_require_token0_or_token1_delta() {
+        assert!(should_require_balance_change(0, 0, 0).is_ok());
+        assert!(should_require_balance_change(1, 0, 0).is_err());
+    }
+
+    #[test]
+    fn dust_branch_transfers_full_reward_input_to_fee() {
+        assert_eq!(calc_dust_transfer_amount(1_000), 1_000);
+    }
+
+    #[test]
+    fn dust_swap_decision_uses_target_side_threshold() {
+        assert!(should_skip_claim_only_dust_swap(0, 999));
+        assert!(!should_skip_claim_only_dust_swap(0, 1_000));
+    }
+
+    #[test]
+    fn fee_accounts_must_match_canonical_atas() {
+        let fee_owner = Pubkey::new_unique();
+        let mint0 = Pubkey::new_unique();
+        let mint1 = Pubkey::new_unique();
+        let fee_token0 = utils::derive_ata_address(
+            &fee_owner,
+            &mint0,
+            &token::ID,
+            &anchor_spl::associated_token::ID,
+        );
+        let fee_token1 = utils::derive_ata_address(
+            &fee_owner,
+            &mint1,
+            &token_2022::ID,
+            &anchor_spl::associated_token::ID,
+        );
+
+        assert!(validate_fee_token_account_keys(
+            fee_owner,
+            fee_token0,
+            fee_token1,
+            mint0,
+            token::ID,
+            mint1,
+            token_2022::ID,
+        )
+        .is_ok());
+
+        assert!(validate_fee_token_account_keys(
+            fee_owner,
+            Pubkey::new_unique(),
+            fee_token1,
+            mint0,
+            token::ID,
+            mint1,
+            token_2022::ID,
+        )
+        .is_err());
     }
 }

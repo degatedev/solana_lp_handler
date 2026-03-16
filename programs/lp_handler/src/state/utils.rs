@@ -1,4 +1,11 @@
 use anchor_lang::prelude::*;
+use anchor_lang::prelude::InterfaceAccount;
+use anchor_spl::token::Token;
+use anchor_spl::token_2022::spl_token_2022::extension::{
+    transfer_fee::{TransferFeeConfig, MAX_FEE_BASIS_POINTS},
+    BaseStateWithExtensions, StateWithExtensions,
+};
+use anchor_spl::token_interface::Mint;
 use raydium_amm_v3::libraries::{liquidity_math, U256};
 
 use crate::LpDepositError;
@@ -141,6 +148,65 @@ pub fn calculate_optimal_swap_amount(
             .checked_sub(amount_1_needed)
             .ok_or(LpDepositError::MathOverflow)?;
         return Ok((swap_amount, amount_0_needed));
+    }
+}
+
+pub fn get_transfer_fee_from_mint_info(mint_info: AccountInfo, pre_fee_amount: u64) -> Result<u64> {
+    if *mint_info.owner == Token::id() {
+        return Ok(0);
+    }
+
+    let mint_data = mint_info.try_borrow_data()?;
+    let mint = StateWithExtensions::<anchor_spl::token_2022::spl_token_2022::state::Mint>::unpack(
+        &mint_data,
+    )?;
+
+    let fee = if let Ok(transfer_fee_config) = mint.get_extension::<TransferFeeConfig>() {
+        let epoch = Clock::get()?.epoch;
+        let transfer_fee = transfer_fee_config.get_epoch_fee(epoch);
+        if u16::from(transfer_fee.transfer_fee_basis_points) == MAX_FEE_BASIS_POINTS {
+            u64::from(transfer_fee.maximum_fee)
+        } else {
+            transfer_fee_config
+                .calculate_epoch_fee(epoch, pre_fee_amount)
+                .unwrap_or(0)
+        }
+    } else {
+        0
+    };
+
+    Ok(fee)
+}
+
+pub fn get_transfer_fee_for_amount(
+    mint: &InterfaceAccount<Mint>,
+    pre_fee_amount: u64,
+) -> Result<u64> {
+    get_transfer_fee_from_mint_info(mint.to_account_info(), pre_fee_amount)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spl_mint_has_zero_transfer_fee() {
+        let key = Pubkey::new_unique();
+        let owner = anchor_spl::token::ID;
+        let mut lamports = 0u64;
+        let mut data = [];
+        let mint_info = AccountInfo::new(
+            &key,
+            false,
+            false,
+            &mut lamports,
+            &mut data,
+            &owner,
+            false,
+            0,
+        );
+
+        assert_eq!(get_transfer_fee_from_mint_info(mint_info, 1_000).unwrap(), 0);
     }
 }
 

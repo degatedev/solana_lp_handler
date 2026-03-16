@@ -2,7 +2,7 @@ use anchor_lang::prelude::*;
 use raydium_amm_v3::cpi as clmm_cpi;
 use raydium_amm_v3::cpi::accounts as clmm_accounts;
 use raydium_amm_v3::program::AmmV3;
-use raydium_amm_v3::states::{AmmConfig, ObservationState, PoolState, TickArrayState};
+use raydium_amm_v3::states::{AmmConfig, ObservationState, PoolState, TickArrayState, TICK_ARRAY_SEED};
 
 use crate::SECURITY_CONFIG_SEED;
 
@@ -12,6 +12,7 @@ use anchor_spl::token::Token;
 use anchor_spl::token_interface::{Mint, Token2022, TokenAccount};
 
 use super::zap_common;
+use crate::LpDepositError;
 
 /// swap_and_deposit 所需的所有账户
 /// 包含 swap_v2 和 open_position_v2 的全部账户（有些可以复用，比如 pool_state、token_program 等）
@@ -96,11 +97,13 @@ pub struct SwapAndDeposit<'info> {
     /// CHECK: `protocol_position` 已废弃，仅为兼容保留
     pub protocol_position: UncheckedAccount<'info>,
 
-    /// CHECK: Raydium CLMM 使用的 TickArray PDA；CPI 时由 Raydium 侧校验/派生
+    /// CHECK: 允许传入尚未初始化的 TickArray PDA；地址在本程序内按 Raydium 规则校验，
+    /// 真正的 owner/初始化语义由 Raydium `open_position_with_token22_nft` CPI 处理。
     #[account(mut)]
     pub tick_array_lower: UncheckedAccount<'info>,
 
-    /// CHECK: Raydium CLMM 使用的 TickArray PDA；CPI 时由 Raydium 侧校验/派生
+    /// CHECK: 允许传入尚未初始化的 TickArray PDA；地址在本程序内按 Raydium 规则校验，
+    /// 真正的 owner/初始化语义由 Raydium `open_position_with_token22_nft` CPI 处理。
     #[account(mut)]
     pub tick_array_upper: UncheckedAccount<'info>,
 
@@ -211,6 +214,15 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
         swap_input_is_token0,
     )?;
 
+    validate_open_position_tick_array_keys(
+        ctx.accounts.pool_state.key(),
+        tick_lower_index,
+        tick_upper_index,
+        plan.tick_spacing,
+        ctx.accounts.tick_array_lower.key(),
+        ctx.accounts.tick_array_upper.key(),
+    )?;
+
     let tick_array_lower_start_index =
         TickArrayState::get_array_start_index(tick_lower_index, plan.tick_spacing);
     let tick_array_upper_start_index =
@@ -247,9 +259,52 @@ pub fn swap_and_deposit<'a, 'b, 'c: 'info, 'info>(
         plan.balance_1_pre_cpi,
         plan.amount_0_max,
         plan.amount_1_max,
-        plan.swap_remaining,
+        plan.cleanup_swap_remaining_input_token0,
+        plan.cleanup_swap_remaining_input_token1,
         position_nft_mint,
     )?;
+
+    Ok(())
+}
+
+fn derive_tick_array_key(pool_state: Pubkey, tick_array_start_index: i32) -> Pubkey {
+    Pubkey::find_program_address(
+        &[
+            TICK_ARRAY_SEED.as_bytes(),
+            pool_state.as_ref(),
+            &tick_array_start_index.to_be_bytes(),
+        ],
+        &raydium_amm_v3::ID,
+    )
+    .0
+}
+
+fn validate_open_position_tick_array_keys(
+    pool_state: Pubkey,
+    tick_lower_index: i32,
+    tick_upper_index: i32,
+    tick_spacing: u16,
+    tick_array_lower: Pubkey,
+    tick_array_upper: Pubkey,
+) -> Result<()> {
+    let tick_array_lower_start_index =
+        TickArrayState::get_array_start_index(tick_lower_index, tick_spacing);
+    let tick_array_upper_start_index =
+        TickArrayState::get_array_start_index(tick_upper_index, tick_spacing);
+
+    let expected_lower = derive_tick_array_key(pool_state, tick_array_lower_start_index);
+    let expected_upper = derive_tick_array_key(pool_state, tick_array_upper_start_index);
+
+    require_keys_eq!(
+        tick_array_lower,
+        expected_lower,
+        LpDepositError::InvalidRemainingAccounts
+    );
+    require_keys_eq!(
+        tick_array_upper,
+        expected_upper,
+        LpDepositError::InvalidRemainingAccounts
+    );
 
     Ok(())
 }
@@ -310,4 +365,46 @@ fn open_position_with_token22_nft<'a, 'b, 'c: 'info, 'info>(
     )?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validates_expected_open_position_tick_array_keys() {
+        let pool = Pubkey::new_unique();
+        let tick_spacing = 60;
+        let tick_lower_index = -1200;
+        let tick_upper_index = 600;
+        let lower_start = TickArrayState::get_array_start_index(tick_lower_index, tick_spacing);
+        let upper_start = TickArrayState::get_array_start_index(tick_upper_index, tick_spacing);
+
+        let res = validate_open_position_tick_array_keys(
+            pool,
+            tick_lower_index,
+            tick_upper_index,
+            tick_spacing,
+            derive_tick_array_key(pool, lower_start),
+            derive_tick_array_key(pool, upper_start),
+        );
+
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn rejects_unexpected_open_position_tick_array_keys() {
+        let pool = Pubkey::new_unique();
+        let err = validate_open_position_tick_array_keys(
+            pool,
+            -1200,
+            600,
+            60,
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err, LpDepositError::InvalidRemainingAccounts.into());
+    }
 }

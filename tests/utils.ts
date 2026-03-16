@@ -10,6 +10,7 @@ import {
   SqrtPriceMath,
   Q64
 } from '@raydium-io/raydium-sdk-v2';
+import { PublicKey } from '@solana/web3.js';
 
 /** —— 类型约束（避免“价格/比例”口径混乱）—— */
 export type SqrtPriceX64 = BN;
@@ -56,6 +57,44 @@ export type ZapPlan = {
   note?: string;
 };
 
+export type RemainingAccountMeta = {
+  pubkey: PublicKey;
+  isSigner: boolean;
+  isWritable: boolean;
+};
+
+type CleanupSwapQuoteRequest = {
+  amountIn: BN;
+  inputIsMintA: boolean;
+};
+
+type CleanupSwapRemainingAccounts = {
+  inputToken0: RemainingAccountMeta[];
+  inputToken1: RemainingAccountMeta[];
+};
+
+type BuildCleanupSwapRemainingAccountsParams = {
+  tickArrayBitmapExtension: PublicKey | null;
+  mintAAddress: PublicKey;
+  mintBAddress: PublicKey;
+  amountAInBN: BN;
+  amountBInBN: BN;
+  mainSwapDirection: ZapSwapDirection;
+  mainSwapAmountIn: BN;
+  mainSwapMinOut: BN;
+  amountAForPosition: BN;
+  amountBForPosition: BN;
+  quoteRemainingAccounts: (request: CleanupSwapQuoteRequest) => Promise<PublicKey[]>;
+};
+
+type QuoteSwapRemainingAccountsParams = {
+  computePool: ComputeClmmPoolInfo;
+  tickArrayCache: ReturnTypeFetchMultiplePoolTickArrays[string];
+  epochInfo: EpochInfo;
+  amountIn: BN;
+  inputIsMintA: boolean;
+};
+
 type SolveZapSingleSidedCLMMParams = {
   tickLower: number;
   tickUpper: number;
@@ -70,6 +109,101 @@ type SolveZapSingleSidedCLMMParams = {
 /** —— 工具 —— */
 const bnToDec = (bn: BN) => new Decimal(bn.toString());
 const sFromX64 = (x64: BN) => new Decimal(x64.toString()).div(new Decimal(Q64.toString()));
+
+const toRemainingAccountMeta = (pubkey: PublicKey): RemainingAccountMeta => ({
+  pubkey,
+  isSigner: false,
+  isWritable: true
+});
+
+const deriveCleanupLeftovers = ({
+  amountAInBN,
+  amountBInBN,
+  mainSwapDirection,
+  mainSwapAmountIn,
+  mainSwapMinOut,
+  amountAForPosition,
+  amountBForPosition
+}: Omit<
+  BuildCleanupSwapRemainingAccountsParams,
+  'tickArrayBitmapExtension' | 'quoteRemainingAccounts' | 'mintAAddress' | 'mintBAddress'
+>) => {
+  let postSwapAmountA = amountAInBN;
+  let postSwapAmountB = amountBInBN;
+
+  if (mainSwapDirection === ZapSwapDirection.AtoB) {
+    postSwapAmountA = amountAInBN.sub(mainSwapAmountIn);
+    postSwapAmountB = amountBInBN.add(mainSwapMinOut);
+  } else if (mainSwapDirection === ZapSwapDirection.BtoA) {
+    postSwapAmountA = amountAInBN.add(mainSwapMinOut);
+    postSwapAmountB = amountBInBN.sub(mainSwapAmountIn);
+  }
+
+  const leftoverA = BN.max(postSwapAmountA.sub(amountAForPosition), new BN(0));
+  const leftoverB = BN.max(postSwapAmountB.sub(amountBForPosition), new BN(0));
+  return {
+    leftoverA,
+    leftoverB
+  };
+};
+
+export async function buildCleanupSwapRemainingAccounts(
+  params: BuildCleanupSwapRemainingAccountsParams
+): Promise<CleanupSwapRemainingAccounts> {
+  const { leftoverA, leftoverB } = deriveCleanupLeftovers(params);
+  const quoteAmountForInputToken0 = BN.max(leftoverA, params.amountAInBN);
+  const quoteAmountForInputToken1 = BN.max(leftoverB, params.amountBInBN);
+  const [quotedInputToken0, quotedInputToken1] = await Promise.all([
+    params.quoteRemainingAccounts({
+      amountIn: BN.max(quoteAmountForInputToken0, new BN(1)),
+      inputIsMintA: true
+    }),
+    params.quoteRemainingAccounts({
+      amountIn: BN.max(quoteAmountForInputToken1, new BN(1)),
+      inputIsMintA: false
+    })
+  ]);
+
+  const withBitmap = (accounts: PublicKey[]): RemainingAccountMeta[] => {
+    const metas: RemainingAccountMeta[] = [];
+
+    if (params.tickArrayBitmapExtension) {
+      metas.push(toRemainingAccountMeta(params.tickArrayBitmapExtension));
+    }
+
+    metas.push(...accounts.map(toRemainingAccountMeta));
+    return metas;
+  };
+
+  return {
+    inputToken0: withBitmap(quotedInputToken0),
+    inputToken1: withBitmap(quotedInputToken1)
+  };
+}
+
+export async function quoteSwapRemainingAccounts({
+  computePool,
+  tickArrayCache,
+  epochInfo,
+  amountIn,
+  inputIsMintA
+}: QuoteSwapRemainingAccountsParams): Promise<PublicKey[]> {
+  if (amountIn.lten(0)) {
+    return [];
+  }
+
+  const tokenOut: ApiV3Token = inputIsMintA ? computePool.mintB : computePool.mintA;
+  const swapAmountOut = await PoolUtils.computeAmountOutFormat({
+    poolInfo: computePool,
+    tickArrayCache,
+    amountIn,
+    tokenOut,
+    slippage: 0,
+    epochInfo
+  });
+
+  return swapAmountOut.remainingAccounts;
+}
 
 export function deriveQuotedModeFromPrice(
   tickLower: number,

@@ -78,6 +78,8 @@ pub struct SecuritySnapshot<'info> {
     /// 入口时未初始化(system owner + data_len=0)的账户索引 + key，用于出口判断"新初始化账户"，
     /// 同时在 exit 做 key 一致性校验（LPH-005 defense-in-depth）。
     pub uninitialized_indices: Vec<(usize, Pubkey)>,
+    /// 入口时 program-owned 账户的 lamports，用于 H01 的相对校验。
+    pub program_owned_lamports: Vec<(Pubkey, u64)>,
 }
 
 fn is_uninitialized_account(ai: &AccountInfo) -> bool {
@@ -86,11 +88,9 @@ fn is_uninitialized_account(ai: &AccountInfo) -> bool {
 }
 
 fn is_user_wsol_ata_address(user: &Pubkey, token_program: &Pubkey, ata: &Pubkey) -> bool {
-    // wSOL = SPL Token native mint
-    let wsol_mint_key = anchor_spl::token::spl_token::native_mint::ID;
     let expected = crate::derive_ata_address(
         user,
-        &wsol_mint_key,
+        &anchor_spl::token::spl_token::native_mint::ID,
         token_program,
         &anchor_spl::associated_token::ID,
     );
@@ -135,6 +135,14 @@ fn parse_token2022_account(ai: &AccountInfo) -> Option<TokenAccountSnapshot> {
 
 fn parse_token_account(ai: &AccountInfo) -> Option<TokenAccountSnapshot> {
     parse_spl_token_account(ai).or_else(|| parse_token2022_account(ai))
+}
+
+fn program_owned_lamports_ok(entry_lamports: u64, exit_lamports: u64) -> bool {
+    exit_lamports <= entry_lamports
+}
+
+fn separator_count_matches(expected: u8, actual: usize) -> bool {
+    actual == usize::from(expected)
 }
 
 fn security_config_pools_len(data: &[u8]) -> Result<usize> {
@@ -251,20 +259,6 @@ fn security_config_fee_owner_contains(
     false
 }
 
-pub fn collect_accounts_to_check<'info>(
-    mut ctx_accounts: Vec<AccountInfo<'info>>,
-    remaining_accounts: &[AccountInfo<'info>],
-) -> Vec<AccountInfo<'info>> {
-    // 预留容量避免 extend 时触发二次分配（降低堆内存峰值）。
-    // 说明：当前安全层主流程通常只扫描 `ctx.accounts`，此函数主要用于“确实需要把 remaining 合并成一个 Vec”
-    // 的场景；如果你担心 OOM，优先使用“分两段循环分别扫描 main + remaining”的方式，避免一次性 Vec 峰值。
-    ctx_accounts.reserve(remaining_accounts.len());
-    ctx_accounts.extend_from_slice(remaining_accounts);
-    // 注意：为降低 SBF 堆内存峰值，这里不再做去重（dedup）。
-    // 可能会重复检查同一账户，但能显著减少 Vec 分配与峰值内存，降低 OOM 风险。
-    ctx_accounts
-}
-
 /// 解析并返回本次指令应使用的安全策略。
 ///
 /// 说明：
@@ -287,6 +281,7 @@ pub fn resolve_policy<'info>(accounts: &[AccountInfo<'info>]) -> Result<Security
 pub fn entry_check_and_snapshot<'info>(
     accounts: &[AccountInfo<'info>],
     remaining_accounts: &[AccountInfo<'info>],
+    expected_separator_count: u8,
     pool_state: &AccountLoader<'info, PoolState>,
     signer: Pubkey,
     recipient: Pubkey,
@@ -300,14 +295,18 @@ pub fn entry_check_and_snapshot<'info>(
     let recipient_exists = accounts.iter().any(|a| a.key() == recipient);
     require!(recipient_exists, LpDepositError::RecipientNotInAccounts);
 
-    // remaining_accounts 分隔符（crate::ID）约束：若出现，则必须唯一、只读
+    // remaining_accounts 分隔符（crate::ID）约束：
+    // - 由具体指令入口显式传入期望值
+    // - zap 新协议：3 个分隔符（main / action / cleanup_token0 / cleanup_token1）
+    // - decrease/claim 旧协议：1 个分隔符
     let sep_cnt = remaining_accounts
         .iter()
         .filter(|a| a.key() == crate::ID)
         .count();
-    if sep_cnt > 0 {
-        require!(sep_cnt == 1, LpDepositError::SecuritySeparatorInvalid);
-    }
+    require!(
+        separator_count_matches(expected_separator_count, sep_cnt),
+        LpDepositError::SecuritySeparatorInvalid
+    );
 
     // Pool 白名单（强制启用）：
     // - 必须提供 security_config PDA（账户需在列表中）
@@ -344,6 +343,7 @@ pub fn entry_check_and_snapshot<'info>(
     // - 入口时未初始化账户索引（用于出口判断“新初始化账户”）
     let mut signer_token_accounts: Vec<SignerTokenAccountBefore<'info>> = Vec::new();
     let mut uninitialized_indices: Vec<(usize, Pubkey)> = Vec::new();
+    let mut program_owned_lamports: Vec<(Pubkey, u64)> = Vec::new();
     let pool_state_data = pool_state.load()?;
 
     for (idx, ai) in accounts.iter().enumerate() {
@@ -363,6 +363,9 @@ pub fn entry_check_and_snapshot<'info>(
         if is_uninitialized_account(ai) {
             // 记录 index + key，exit 阶段可校验“同一个位置的账户是否仍为同一个 key”
             uninitialized_indices.push((idx, ai.key()));
+        }
+        if ai.owner == &crate::ID {
+            program_owned_lamports.push((ai.key(), ai.lamports()));
         }
         if let Some(ta) = parse_token_account(ai) {
             if ta.owner == signer {
@@ -385,7 +388,7 @@ pub fn entry_check_and_snapshot<'info>(
                     );
                 }
                 let token_program = ta.token_program;
-                let is_wsol_ata = ta.mint == anchor_spl::token::spl_token::native_mint::ID
+                let is_wsol_ata = crate::consts::is_native_sol_mint(&ta.mint)
                     && is_user_wsol_ata_address(&signer, &token_program, &ai.key());
                 signer_token_accounts.push(SignerTokenAccountBefore {
                     account: ai.clone(),
@@ -458,7 +461,7 @@ pub fn entry_check_and_snapshot<'info>(
                     );
                 }
                 let token_program = ta.token_program;
-                let is_wsol_ata = ta.mint == anchor_spl::token::spl_token::native_mint::ID
+                let is_wsol_ata = crate::consts::is_native_sol_mint(&ta.mint)
                     && is_user_wsol_ata_address(&signer, &token_program, &ai.key());
                 signer_token_accounts.push(SignerTokenAccountBefore {
                     account: ai.clone(),
@@ -472,6 +475,7 @@ pub fn entry_check_and_snapshot<'info>(
     Ok(SecuritySnapshot {
         signer_token_accounts,
         uninitialized_indices,
+        program_owned_lamports,
     })
 }
 
@@ -489,7 +493,6 @@ pub fn exit_check<'info>(
     policy: &SecurityPolicy,
     before: SecuritySnapshot<'info>,
 ) -> Result<()> {
-    let rent = Rent::get()?;
     // 允许的 token authority（用于“新初始化 token account”场景）：
     // - 若 authority == recipient：允许（业务指定收款方）
     // - 若 authority == signer：允许（默认收款方为签名者）
@@ -505,14 +508,15 @@ pub fn exit_check<'info>(
     }
 
     // 1) 约束：lp_handler 自己拥有的账户不应滞留多余 SOL（对本次账户集合内所有 owner==lp_handler 的账户）
-    for ai in accounts.iter() {
-        if ai.owner == &crate::ID {
-            let min = rent.minimum_balance(ai.data_len());
-            require!(
-                ai.lamports() <= min,
-                LpDepositError::SecurityProgramLamportsLeaked
-            );
-        }
+    for (account_key, entry_lamports) in before.program_owned_lamports.iter() {
+        let ai = accounts
+            .iter()
+            .find(|account| account.key() == *account_key)
+            .ok_or(LpDepositError::SecurityAccountSetChanged)?;
+        require!(
+            program_owned_lamports_ok(*entry_lamports, ai.lamports()),
+            LpDepositError::SecurityProgramLamportsLeaked
+        );
     }
 
     // 2) signer token 账户权限对账（入口阶段 authority==signer 的 token accounts）
@@ -598,4 +602,37 @@ pub fn exit_check<'info>(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn program_owned_lamports_check_allows_preexisting_extra_lamports() {
+        assert!(program_owned_lamports_ok(11, 11));
+        assert!(program_owned_lamports_ok(11, 10));
+    }
+
+    #[test]
+    fn program_owned_lamports_check_rejects_increase_after_entry() {
+        assert!(!program_owned_lamports_ok(11, 12));
+    }
+
+    #[test]
+    fn separator_count_accepts_matching_single_separator() {
+        assert!(separator_count_matches(1, 1));
+    }
+
+    #[test]
+    fn separator_count_accepts_matching_zap_dual_cleanup_protocol() {
+        assert!(separator_count_matches(3, 3));
+    }
+
+    #[test]
+    fn separator_count_rejects_mismatched_values() {
+        assert!(!separator_count_matches(1, 3));
+        assert!(!separator_count_matches(3, 1));
+        assert!(!separator_count_matches(3, 2));
+    }
 }

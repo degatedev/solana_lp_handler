@@ -12,7 +12,7 @@ use state::*;
 
 // ProgramId 需要与部署的 program keypair 对应的地址一致。
 // 本分支统一使用生产环境（mainnet）的 ProgramId。
-declare_id!("HM7ZJsDUZfbXboyDxrVbZ7qCvoEqUXqTVjeHHuWKcCmK");
+declare_id!("49hNqYPpCiVpNuHQpMmLeiqbbb1k8sYF3BjuWRXkknND");
 
 #[program]
 #[allow(deprecated)]
@@ -31,6 +31,7 @@ pub mod lp_handler {
             signer = $signer:expr,
             recipient = $recipient:expr,
             fee_owner = $fee_owner:expr,
+            separator_count = $separator_count:expr,
             pool_state = $pool:expr,
             body = $body:expr
         ) => {{
@@ -44,6 +45,7 @@ pub mod lp_handler {
             let snapshot = sec::entry_check_and_snapshot(
                 &accounts,
                 $ctx.remaining_accounts,
+                $separator_count,
                 $pool,
                 $signer,
                 $recipient,
@@ -80,6 +82,7 @@ pub mod lp_handler {
             signer = signer,
             recipient = recipient,
             fee_owner = fee_owner,
+            separator_count = 3u8,
             pool_state = &ctx.accounts.pool_state,
             body = instructions::swap_and_deposit(
                 ctx,
@@ -110,7 +113,7 @@ pub mod lp_handler {
         quoted_sqrt_price_x64: u128,
         slippage_bps: u16,
         fee_percent: u16,
-        convert_to_usdc: bool,
+        convert_to_target_mint: bool,
     ) -> Result<()> {
         let signer = ctx.accounts.signer.key();
         let recipient = ctx.accounts.recipient.key();
@@ -120,6 +123,7 @@ pub mod lp_handler {
             signer = signer,
             recipient = recipient,
             fee_owner = fee_owner,
+            separator_count = 1u8,
             pool_state = &ctx.accounts.pool_state,
             body = instructions::decrease_liquidity(
                 ctx,
@@ -130,7 +134,7 @@ pub mod lp_handler {
                 quoted_sqrt_price_x64,
                 slippage_bps,
                 fee_percent,
-                convert_to_usdc,
+                convert_to_target_mint,
             )
         )
     }
@@ -156,6 +160,7 @@ pub mod lp_handler {
             signer = signer,
             recipient = signer,
             fee_owner = fee_owner,
+            separator_count = 3u8,
             pool_state = &ctx.accounts.pool_state,
             body = instructions::increase_liquidity(
                 ctx,

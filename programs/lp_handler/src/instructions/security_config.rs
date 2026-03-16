@@ -9,20 +9,32 @@ fn event_count(len: usize) -> Result<u32> {
     u32::try_from(len).map_err(|_| error!(LpDepositError::MathOverflow))
 }
 
+fn validate_security_config_inputs(pools_len: usize, fee_owners_len: usize) -> Result<()> {
+    require!(pools_len != 0, LpDepositError::SecurityConfigPoolsEmpty);
+    require!(pools_len <= MAX_ALLOWED_POOLS, LpDepositError::MathOverflow);
+    require!(fee_owners_len != 0, LpDepositError::InvalidFeeOwner);
+    require!(
+        fee_owners_len <= MAX_FEE_OWNERS,
+        LpDepositError::MathOverflow
+    );
+    Ok(())
+}
+
+fn validate_security_config_init_authority(authority: Pubkey) -> Result<()> {
+    require!(
+        authority == crate::consts::SECURITY_ADMIN,
+        LpDepositError::SecurityConfigAdminUnauthorized
+    );
+    Ok(())
+}
+
 pub fn init_security_config(
     ctx: Context<InitSecurityConfig>,
     pools: Vec<Pubkey>,
     fee_owners: Vec<Pubkey>,
 ) -> Result<()> {
-    require!(!pools.is_empty(), LpDepositError::SecurityConfigPoolsEmpty);
-    require!(
-        pools.len() <= MAX_ALLOWED_POOLS,
-        LpDepositError::MathOverflow
-    );
-    require!(
-        fee_owners.len() <= MAX_FEE_OWNERS,
-        LpDepositError::MathOverflow
-    );
+    validate_security_config_init_authority(ctx.accounts.authority.key())?;
+    validate_security_config_inputs(pools.len(), fee_owners.len())?;
     let cfg = &mut ctx.accounts.security_config;
     cfg.authority = ctx.accounts.authority.key();
     cfg.pools = pools.clone();
@@ -43,15 +55,7 @@ pub fn update_security_config(
     pools: Vec<Pubkey>,
     fee_owners: Vec<Pubkey>,
 ) -> Result<()> {
-    require!(!pools.is_empty(), LpDepositError::SecurityConfigPoolsEmpty);
-    require!(
-        pools.len() <= MAX_ALLOWED_POOLS,
-        LpDepositError::MathOverflow
-    );
-    require!(
-        fee_owners.len() <= MAX_FEE_OWNERS,
-        LpDepositError::MathOverflow
-    );
+    validate_security_config_inputs(pools.len(), fee_owners.len())?;
     let cfg = &mut ctx.accounts.security_config;
     cfg.pools = pools.clone();
     cfg.fee_owners = fee_owners.clone();
@@ -126,4 +130,27 @@ pub struct CloseSecurityConfig<'info> {
     /// CHECK: 接收退回租金的账户（通常是 authority）
     #[account(mut)]
     pub receiver: UncheckedAccount<'info>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_empty_fee_owner_list() {
+        let err = validate_security_config_inputs(1, 0).unwrap_err();
+        assert_eq!(err, LpDepositError::InvalidFeeOwner.into());
+    }
+
+    #[test]
+    fn rejects_non_admin_init_authority() {
+        let err = validate_security_config_init_authority(Pubkey::new_unique()).unwrap_err();
+        assert_eq!(err, LpDepositError::SecurityConfigAdminUnauthorized.into());
+    }
+
+    #[test]
+    fn accepts_configured_init_authority() {
+        let result = validate_security_config_init_authority(crate::consts::SECURITY_ADMIN);
+        assert!(result.is_ok());
+    }
 }

@@ -101,14 +101,12 @@ export const endPrice = 522;
 export const fee_address = new PublicKey('E32ykUTbi4Ag8t4Hic41HtDVwAZca1oGorqvkt3YS7Dy');
 export const fee_percent = 1200;
 
-export const securityConfig = PublicKey.findProgramAddressSync([Buffer.from('security_config')], program.programId)[0]
+export const securityConfig = PublicKey.findProgramAddressSync([Buffer.from('security_config')], program.programId)[0];
 
-
-
-export const pools =[
+export const pools = [
   new PublicKey('HHQUnUbmWLrYzkscDY1C3deEFbGtiGBGoHjpANogmvum'), // TSLAx-USDC
-  new PublicKey('CKwJZwm7oj3nu4653N1EpDrqXbXAYXoPFiPeEnLouF8y') ,//AAPLx-USDC
-  new PublicKey('6m5aXAve4uh6Kt4ytKyCLWNMjd8PYP5vujwNCtycrUiD'),//AMZNx-USDC
+  new PublicKey('CKwJZwm7oj3nu4653N1EpDrqXbXAYXoPFiPeEnLouF8y'), //AAPLx-USDC
+  new PublicKey('6m5aXAve4uh6Kt4ytKyCLWNMjd8PYP5vujwNCtycrUiD'), //AMZNx-USDC
   new PublicKey('4KqQN6u1pFKroFE2jVEhoepAMRKPcuAzWVDCgm9zRBYN'), // NVDAx
   new PublicKey('3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv'), // SOL-USDC
   new PublicKey('G39wywquKbHK8F2wZZZFX3fcsyG91VCCbbr6WEVp5axy'), // CRCLx-USDC
@@ -117,5 +115,5 @@ export const pools =[
   new PublicKey('B8YAwjGYk6qidWzGBXMAxP7nYfG8g74EZ3Y4gFSsobRw'), // GOOGLx
   new PublicKey('FknDV1F5n6QaA7rLmjquDjuU6wcPMNm5RYq7zWbqhpZw'), // QQQx-USDC
   new PublicKey('3L7KbPVaAQA4UTecaGQYsm6UCq5F3sZM9zAYkxqYt63j'), // Meta-USDC
-  new PublicKey('FknDV1F5n6QaA7rLmjquDjuU6wcPMNm5RYq7zWbqhpZw'), // QQQx-USDC
-]
+  new PublicKey('FknDV1F5n6QaA7rLmjquDjuU6wcPMNm5RYq7zWbqhpZw') // QQQx-USDC
+];

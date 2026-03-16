@@ -1,8 +1,7 @@
 use anchor_lang::prelude::*;
 
 // -----------------------------
-// Security layer hardcoded config
-//（不通过 PDA，直接写死在程序里）
+// Security layer static allowlists
 // -----------------------------
 
 /// 允许出现在账户列表中的“可执行程序账户（executable program account）”白名单。
@@ -30,6 +29,16 @@ pub const ALLOWED_ACCOUNT_OWNERS: &[Pubkey] = &[
     raydium_amm_v3::ID,
 ];
 
-pub const USDC_MIN: Pubkey = pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+// SecurityConfig 初始化管理员。
+// 构建时必须显式注入 `SECURITY_ADMIN` 环境变量；
+// 发布脚本会在 `anchor build` 前注入当前部署钱包地址。
+include!(concat!(env!("OUT_DIR"), "/security_admin.rs"));
+
+pub const USDC_MINT: Pubkey = pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 
 pub const MIN_USDC_SWAP_AMOUNT: u64 = 1000;
+
+pub fn is_native_sol_mint(mint: &Pubkey) -> bool {
+    *mint == anchor_spl::token::spl_token::native_mint::ID
+        || *mint == anchor_spl::token_2022::spl_token_2022::native_mint::ID
+}

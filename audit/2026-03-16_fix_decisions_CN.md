@@ -3,29 +3,29 @@
 说明：
 
 * 本文档按审计报告中的编号逐项列出处理决定。
-* `Fixed` 表示已修复；其中 `059613e` 为已存在提交，其余本轮修改仍在当前工作区，待整理提交后补充最终 commit hash。
+* `Fixed` 表示已修复；其中 `059613e` 为既有提交，其余本轮修复已整理为提交 `09841f3039774e285039c0c478dc49e5c77e63e3` 。
 * `Acknowledged` 表示已确认但选择不按报告建议修复，并附上接受风险说明。
 
 | 问题 | 处理决定 | Commit Hash | 说明 |
 | --- | --- | --- | --- |
-| `H01` | `Fixed` | `待提交` | 已将 program-owned account 的 lamports 检查改为“入口快照 / 出口相对校验”，不再使用绝对 rent 上限，避免外部向 PDA 打入 lamports 导致全局 DoS。 |
-| `M01` | `Fixed` | `待提交` | 已在 deposit / zap 侧按 Token-2022 transfer fee 口径扣减后再计算 liquidity；在 decrease 路径中也按扣费后的 expected principal 与真实余额变化对账。 |
+| `H01` | `Fixed` | `09841f3039774e285039c0c478dc49e5c77e63e3` | 已将 program-owned account 的 lamports 检查改为“入口快照 / 出口相对校验”，不再使用绝对 rent 上限，避免外部向 PDA 打入 lamports 导致全局 DoS。 |
+| `M01` | `Fixed` | `09841f3039774e285039c0c478dc49e5c77e63e3` | 已在 deposit / zap 侧按 Token-2022 transfer fee 口径扣减后再计算 liquidity；在 decrease 路径中也按扣费后的 expected principal 与真实余额变化对账。 |
 | `M02` | `Fixed` | `059613e` | 已引入 `quoted_mode` 与 `quoted_sqrt_price_x64` 校验，避免 out-of-range 自动换币覆盖用户提供的最小成交保护。 |
-| `M03` | `Fixed` | `待提交` | 已将主 zap swap 改为同时使用 `quoted_mode` / `quoted_sqrt_price_x64` / `swap_min_out` 与 `sqrt_price_limit_x64` tick-boundary enforcement，避免自动换币把价格继续推进穿过仓位边界。 `059613e` 完成了报价锚定，这一轮补上了边界限价。 |
-| `M04` | `Fixed` | `待提交` | `init_security_config` 现在仍然要求固定初始化管理员，但该管理员不再手写死在仓库里，而是由发布脚本在 `anchor build` 前通过 `SECURITY_ADMIN` 环境变量注入为当前部署钱包地址。这样既满足受限初始化要求，也适配现有发布流程。 |
+| `M03` | `Fixed` | `09841f3039774e285039c0c478dc49e5c77e63e3` | 已将主 zap swap 改为同时使用 `quoted_mode` / `quoted_sqrt_price_x64` / `swap_min_out` 与 `sqrt_price_limit_x64` tick-boundary enforcement，避免自动换币把价格继续推进穿过仓位边界。 `059613e` 完成了报价锚定，这一轮补上了边界限价。 |
+| `M04` | `Fixed` | `09841f3039774e285039c0c478dc49e5c77e63e3` | `init_security_config` 现在仍然要求固定初始化管理员，但该管理员不再手写死在仓库里，而是由发布脚本在 `anchor build` 前通过 `SECURITY_ADMIN` 环境变量注入为当前部署钱包地址。这样既满足受限初始化要求，也适配现有发布流程。 |
 | `M05` | `Fixed` | `059613e` | 已为 claim / convert 相关路径补充报价约束与价格保护，使其和 deposit 路径保持一致。 |
 | `L01` | `Acknowledged` | `-` | 我们已经将 `remaining_accounts` 拆分为 `main_swap_remaining` 、 `action_remaining` 、 `cleanup_swap_remaining_input_token0` 、 `cleanup_swap_remaining_input_token1` 四段；cleanup swap 由链下同时提供双向候选 slice，链上再按实际 leftover 输入方向选择，不再直接复用主 swap 路径。同时，cleanup swap 现已调整为 best-effort：若主 swap 与开仓/加仓已成功，但 cleanup 因 CU、路径或状态偏差失败，则不回滚主流程，leftover 保留在用户账户。当前客户端仍未完整复刻 `post-action liquidity` 对后续 tick array 路径的影响，因此这项未按报告最严格标准做成完全修复；我们接受这部分残余风险。 |
-| `L02` | `Fixed` | `待提交` | 已将 dust 判断改为基于目标侧估算输出，而不是把任意 mint 的 raw amount 直接与 `MIN_USDC_SWAP_AMOUNT` 比较。 |
+| `L02` | `Fixed` | `09841f3039774e285039c0c478dc49e5c77e63e3` | 已将 dust 判断改为基于目标侧估算输出，而不是把任意 mint 的 raw amount 直接与 `MIN_USDC_SWAP_AMOUNT` 比较。 |
 | `L03` | `Acknowledged` | `-` | 该分支是保留的业务设计：当预估兑换到目标侧的数量过小、可能导致 0-output 或无意义 swap 时，直接将该 reward 输入转入 fee 地址。我们不按报告建议改成仅按 `fee_percent` 收费，因为那会改变既有产品语义；相应风险为已知且可接受。 |
-| `L04` | `Fixed` | `待提交` | 已强制 `fee_token0_account` / `fee_token1_account` 必须为 `fee_owner` 对应 mint 的 canonical ATA，避免 fee 碎片化。 |
+| `L04` | `Fixed` | `09841f3039774e285039c0c478dc49e5c77e63e3` | 已强制 `fee_token0_account` / `fee_token1_account` 必须为 `fee_owner` 对应 mint 的 canonical ATA，避免 fee 碎片化。 |
 | `L05` | `Acknowledged` | `-` | 我们已放宽 `reward-only claim` ，避免在 claim-only 场景因 `NoBalanceChange` 回滚；但不会按报告建议对额外 farming / incentive reward 计费。原因是协议设计上只对池子两币收取手续费，额外激励代币不属于协议收费范围，因此放弃这部分 fee revenue 是有意识接受的产品决策。 |
-| `E01` | `Fixed` | `待提交` | 已将 `USDC_MIN` 统一更名为更准确的 `USDC_MINT` 。 |
-| `E02` | `Fixed` | `待提交` | 已增加统一 helper，统一处理 SPL Token native mint 与 Token-2022 native mint 的识别逻辑。 |
-| `E03` | `Fixed` | `待提交` | 已删除未被使用的 `collect_accounts_to_check` 死代码，避免误导阅读者误以为安全层已统一扫描全部 `remaining_accounts` 。 |
-| `E04` | `Fixed` | `待提交` | 已统一 tick array 相关约束： `swap_and_deposit` / `increase_liquidity` / `decrease_liquidity` 的账户校验逻辑现已与底层 Raydium CPI 语义保持一致；其中 `swap_and_deposit` 已放宽为允许传入尚未初始化的 lower/upper tick array PDA，并在本程序内按 Raydium 规则校验其 PDA 地址，避免合法开仓因包装层过严而被提前拒绝。 |
-| `E05` | `Fixed` | `待提交` | 已在 `init_security_config` 与 `update_security_config` 中强制 `fee_owners` 白名单不能为空。 |
-| `E06` | `Fixed` | `待提交` | 已在 `increase_liquidity` 中校验传入的 `tick_lower_index` / `tick_upper_index` 必须与现有 `personal_position` 一致。 |
-| `E07` | `Fixed` | `待提交` | 已将 `convert_to_usdc` 更名为更准确的 `convert_to_target_mint` ，并同步更新相关文档说明。 |
+| `E01` | `Fixed` | `09841f3039774e285039c0c478dc49e5c77e63e3` | 已将 `USDC_MIN` 统一更名为更准确的 `USDC_MINT` 。 |
+| `E02` | `Fixed` | `09841f3039774e285039c0c478dc49e5c77e63e3` | 已增加统一 helper，统一处理 SPL Token native mint 与 Token-2022 native mint 的识别逻辑。 |
+| `E03` | `Fixed` | `09841f3039774e285039c0c478dc49e5c77e63e3` | 已删除未被使用的 `collect_accounts_to_check` 死代码，避免误导阅读者误以为安全层已统一扫描全部 `remaining_accounts` 。 |
+| `E04` | `Fixed` | `09841f3039774e285039c0c478dc49e5c77e63e3` | 已统一 tick array 相关约束： `swap_and_deposit` / `increase_liquidity` / `decrease_liquidity` 的账户校验逻辑现已与底层 Raydium CPI 语义保持一致；其中 `swap_and_deposit` 已放宽为允许传入尚未初始化的 lower/upper tick array PDA，并在本程序内按 Raydium 规则校验其 PDA 地址，避免合法开仓因包装层过严而被提前拒绝。 |
+| `E05` | `Fixed` | `09841f3039774e285039c0c478dc49e5c77e63e3` | 已在 `init_security_config` 与 `update_security_config` 中强制 `fee_owners` 白名单不能为空。 |
+| `E06` | `Fixed` | `09841f3039774e285039c0c478dc49e5c77e63e3` | 已在 `increase_liquidity` 中校验传入的 `tick_lower_index` / `tick_upper_index` 必须与现有 `personal_position` 一致。 |
+| `E07` | `Fixed` | `09841f3039774e285039c0c478dc49e5c77e63e3` | 已将 `convert_to_usdc` 更名为更准确的 `convert_to_target_mint` ，并同步更新相关文档说明。 |
 
 ## 示例修改代码
 

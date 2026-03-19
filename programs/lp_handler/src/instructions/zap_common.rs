@@ -187,7 +187,7 @@ fn validate_quoted_mode_and_price(
     quoted_sqrt_price_x64: u128,
     slippage_bps: u16,
 ) -> Result<QuotedZapMode> {
-    validate_price_floor_from_quote(current_sqrt_price_x64, quoted_sqrt_price_x64, slippage_bps)?;
+    validate_price_from_quote(current_sqrt_price_x64, quoted_sqrt_price_x64, slippage_bps)?;
 
     let quoted_mode = QuotedZapMode::try_from_u8(quoted_mode)?;
     let actual_mode =
@@ -199,15 +199,27 @@ fn validate_quoted_mode_and_price(
     Ok(actual_mode)
 }
 
+/// M3 修复：根据 mode 区分 in-range 和 out-of-range 的 price limit 方向。
+/// - InRange: 防止 swap 将价格推出范围
+/// - OutOfRange: 防止 swap 将价格推入范围
 fn derive_main_swap_price_limit(
     tick_lower_index: i32,
     tick_upper_index: i32,
     swap_input_is_token0: bool,
+    mode: QuotedZapMode,
 ) -> Result<u128> {
-    if swap_input_is_token0 {
-        get_sqrt_price_at_tick(tick_lower_index)
-    } else {
-        get_sqrt_price_at_tick(tick_upper_index)
+    use QuotedZapMode::*;
+    match (swap_input_is_token0, mode) {
+        // InRange: 卖 token0 价格下降 → 停在 lower tick
+        (true, InRange) => get_sqrt_price_at_tick(tick_lower_index),
+        // InRange: 卖 token1 价格上升 → 停在 upper tick
+        (false, InRange) => get_sqrt_price_at_tick(tick_upper_index),
+        // OutOfRangeToken1Only: 卖 token0 价格下降 → 停在 upper tick（防止进入范围）
+        (true, OutOfRangeToken1Only) => get_sqrt_price_at_tick(tick_upper_index),
+        // OutOfRangeToken0Only: 卖 token1 价格上升 → 停在 lower tick（防止进入范围）
+        (false, OutOfRangeToken0Only) => get_sqrt_price_at_tick(tick_lower_index),
+        // 其他组合已被 mode 验证阻止（如 out-of-range-token0-only 时不应卖 token0）
+        _ => err!(LpDepositError::InvalidDepositAmount),
     }
 }
 
@@ -302,20 +314,33 @@ fn finalize_return_amounts_for_target_token1(
     (return_amount_0, return_amount_1)
 }
 
-pub(crate) fn validate_price_floor_from_quote(
+/// M2 修复：双向价格偏差检查。
+/// 原来只检查价格下跌（单向），对 token1->token0 方向的价格上涨无效。
+/// 现在检查 |current_price - quoted_price| <= quoted_price * slippage_bps / 10000。
+pub(crate) fn validate_price_from_quote(
     current_sqrt_price_x64: u128,
     quoted_sqrt_price_x64: u128,
     slippage_bps: u16,
 ) -> Result<()> {
     require!(slippage_bps <= 10_000, LpDepositError::InvalidSlippage);
+    require!(quoted_sqrt_price_x64 > 0, LpDepositError::InvalidSlippage);
 
-    let current_price_q64 =
+    let current_price =
         (U256::from(current_sqrt_price_x64) * U256::from(current_sqrt_price_x64)) >> 64;
-    let quoted_price_q64 =
+    let quoted_price =
         (U256::from(quoted_sqrt_price_x64) * U256::from(quoted_sqrt_price_x64)) >> 64;
-    let lhs = current_price_q64 * U256::from(10_000u128);
-    let rhs = quoted_price_q64 * U256::from(10_000u128 - slippage_bps as u128);
-    require!(lhs >= rhs, LpDepositError::QuotedPriceBelowMinimum);
+
+    let delta = if current_price >= quoted_price {
+        current_price - quoted_price
+    } else {
+        quoted_price - current_price
+    };
+
+    require!(
+        delta * U256::from(10_000u128) <= quoted_price * U256::from(slippage_bps as u128),
+        LpDepositError::QuotedPriceBelowMinimum
+    );
+
     Ok(())
 }
 
@@ -416,8 +441,6 @@ pub fn prepare_zap_plan_and_swap_if_needed<'info>(
         cleanup_swap_remaining_input_token0_slice,
         cleanup_swap_remaining_input_token1_slice,
     ) = split_zap_remaining_accounts(remaining_accounts)?;
-    let main_swap_price_limit_x64 =
-        derive_main_swap_price_limit(tick_lower_index, tick_upper_index, swap_input_is_token0)?;
 
     // 执行主配平 swap（plan 指定，最多一次）
     let mut amount_0_max = amount_0_in;
@@ -426,6 +449,10 @@ pub fn prepare_zap_plan_and_swap_if_needed<'info>(
     let balance_1_pre_cpi: u64;
 
     if swap_amount_in > 0 {
+        // price limit 只在实际 swap 时计算；当 swap_amount_in == 0 时
+        // mode 不约束 swap_input_is_token0，延迟计算避免走到无效分支。
+        let main_swap_price_limit_x64 =
+            derive_main_swap_price_limit(tick_lower_index, tick_upper_index, swap_input_is_token0, quoted_mode)?;
         swap_v2_common(
             accounts,
             swap_amount_in,
@@ -1275,15 +1302,41 @@ mod tests {
     }
 
     #[test]
-    fn main_swap_price_limit_uses_lower_tick_when_selling_token0() {
-        let limit = derive_main_swap_price_limit(-100, 200, true).unwrap();
+    fn main_swap_price_limit_in_range_uses_lower_tick_when_selling_token0() {
+        let limit =
+            derive_main_swap_price_limit(-100, 200, true, QuotedZapMode::InRange).unwrap();
         assert_eq!(limit, get_sqrt_price_at_tick(-100).unwrap());
     }
 
     #[test]
-    fn main_swap_price_limit_uses_upper_tick_when_selling_token1() {
-        let limit = derive_main_swap_price_limit(-100, 200, false).unwrap();
+    fn main_swap_price_limit_in_range_uses_upper_tick_when_selling_token1() {
+        let limit =
+            derive_main_swap_price_limit(-100, 200, false, QuotedZapMode::InRange).unwrap();
         assert_eq!(limit, get_sqrt_price_at_tick(200).unwrap());
+    }
+
+    #[test]
+    fn main_swap_price_limit_out_of_range_token1_only_uses_upper_tick_when_selling_token0() {
+        let limit = derive_main_swap_price_limit(
+            -100,
+            200,
+            true,
+            QuotedZapMode::OutOfRangeToken1Only,
+        )
+        .unwrap();
+        assert_eq!(limit, get_sqrt_price_at_tick(200).unwrap());
+    }
+
+    #[test]
+    fn main_swap_price_limit_out_of_range_token0_only_uses_lower_tick_when_selling_token1() {
+        let limit = derive_main_swap_price_limit(
+            -100,
+            200,
+            false,
+            QuotedZapMode::OutOfRangeToken0Only,
+        )
+        .unwrap();
+        assert_eq!(limit, get_sqrt_price_at_tick(-100).unwrap());
     }
 
     #[test]

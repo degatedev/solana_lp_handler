@@ -2,8 +2,7 @@ use anchor_lang::prelude::InterfaceAccount;
 use anchor_lang::prelude::*;
 use anchor_spl::token::Token;
 use anchor_spl::token_2022::spl_token_2022::extension::{
-    transfer_fee::{TransferFeeConfig, MAX_FEE_BASIS_POINTS},
-    BaseStateWithExtensions, StateWithExtensions,
+    transfer_fee::TransferFeeConfig, BaseStateWithExtensions, StateWithExtensions,
 };
 use anchor_spl::token_interface::Mint;
 use raydium_amm_v3::libraries::{liquidity_math, U256};
@@ -15,14 +14,11 @@ fn calculate_transfer_fee_from_config(
     epoch: u64,
     pre_fee_amount: u64,
 ) -> Result<u64> {
-    let transfer_fee = transfer_fee_config.get_epoch_fee(epoch);
-    if u16::from(transfer_fee.transfer_fee_basis_points) == MAX_FEE_BASIS_POINTS {
-        Ok(u64::from(transfer_fee.maximum_fee))
-    } else {
-        transfer_fee_config
-            .calculate_epoch_fee(epoch, pre_fee_amount)
-            .ok_or(LpDepositError::MathOverflow.into())
-    }
+    // M1 修复：`calculate_epoch_fee` 内部已处理 min(raw_fee, maximum_fee)，
+    // 无需对 MAX_FEE_BASIS_POINTS 做特殊分支。
+    transfer_fee_config
+        .calculate_epoch_fee(epoch, pre_fee_amount)
+        .ok_or(LpDepositError::MathOverflow.into())
 }
 
 /// `require!` + 可选日志（不分配 heap）。

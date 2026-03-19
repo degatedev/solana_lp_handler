@@ -410,9 +410,19 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
                 ctx.accounts.amm_config.trade_fee_rate,
             )?;
 
+            // L2 修复：USDC 配对池中，始终用 USDC 计价的金额做 dust 判断。
+            // - target 是 USDC → swap 输出 threshold 是 USDC 计价
+            // - target 不是 USDC → swap 输入 total_other_in 就是 USDC 金额
+            let is_target_usdc = swap_to_token_mint == crate::consts::USDC_MINT;
+            let usdc_denominated_amount = if is_target_usdc {
+                swap_other_amount_threshold
+            } else {
+                total_other_in
+            };
+
             if should_skip_claim_only_dust_swap(
                 principal_other_in,
-                swap_other_amount_threshold,
+                usdc_denominated_amount,
             ) {
                 msg!(
                     "skip reward swap (claim-only dust): below MIN_USDC_SWAP_AMOUNT, transfer full reward input to fee"
@@ -449,7 +459,7 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
                     let pool_state = ctx.accounts.pool_state.load()?;
                     pool_state.sqrt_price_x64
                 };
-                zap_common::validate_price_floor_from_quote(
+                zap_common::validate_price_from_quote(
                     current_sqrt_price_x64,
                     quoted_sqrt_price_x64,
                     slippage_bps,
@@ -976,11 +986,14 @@ fn calc_dust_transfer_amount(reward_amount: u64) -> u64 {
     reward_amount
 }
 
+/// L2 修复：始终用 USDC 计价的金额与 MIN_USDC_SWAP_AMOUNT 比较。
+/// - target 是 USDC 时，swap 输出（threshold）是 USDC 计价 → 用 threshold
+/// - target 不是 USDC 时，swap 输入（total_other_in）就是 USDC → 用 total_other_in
 fn should_skip_claim_only_dust_swap(
     principal_other_in: u64,
-    swap_other_amount_threshold: u64,
+    usdc_denominated_amount: u64,
 ) -> bool {
-    principal_other_in == 0 && swap_other_amount_threshold < crate::consts::MIN_USDC_SWAP_AMOUNT
+    principal_other_in == 0 && usdc_denominated_amount < crate::consts::MIN_USDC_SWAP_AMOUNT
 }
 
 fn validate_fee_token_account_keys(

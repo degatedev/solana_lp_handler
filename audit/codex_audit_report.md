@@ -1,11 +1,11 @@
 # DeGate LP Handler 安全复审报告
 
 **审计代码**: 当前工作区代码  
-**审计日期**: 2026-03-16  
+**审计日期**: 2026-03-19  
 **审计执行**: codex
 **审计范围**: `programs/lp_handler/src/` 全部文件  
 **审计方法**: 静态代码复审 + 既有审计结论交叉验证 + 单元测试验证  
-**参考资料**: `audit/2026-02-06_fix.md` , `audit/2026-03-16_fix_decisions_CN.md` , `audit/2026-03-16_audit_report.md`
+**参考资料**: `audit/2026-02-06_fix.md` , `audit/2026-03-16_fix_decisions_CN.md` , `audit/2026-03-19_fix_review_remediation_report_CN.md` , `audit/2023-03-19-degate_audit_report_before_fix_review.md`
 
 ---
 
@@ -30,11 +30,11 @@
 | H01 | Lamport 注入 DoS SecurityConfig PDA | High | Fixed | `security/mod.rs` 已改为入口快照 / 出口相对校验，不再依赖绝对 rent 上限 |
 | M01 | Token-2022 transfer fee 未纳入计算 | Medium | Fixed | `zap_common.rs` 与 `decrease_liquidity.rs` 均已按 transfer fee 口径扣减后计算 |
 | M02 | Out-of-range auto-swap 覆盖用户 min_out | Medium | Fixed | 已引入 `quoted_mode` 与 `quoted_sqrt_price_x64` ，链上不再自动重写 swap plan |
-| M03 | Zap swap 无价格边界保护 | Medium | Fixed | 主 swap 已增加 `sqrt_price_limit_x64` ，按 tick boundary 限价 |
+| M03 | Zap swap 无价格边界保护 | Medium | Fixed | 主 swap 已增加 `sqrt_price_limit_x64` ，并按 `QuotedZapMode + swap direction` 同时覆盖 `in-range` 与 `out-of-range` 边界 |
 | M04 | SecurityConfig init 可被抢跑 | Medium | Fixed | `build.rs` 注入 `SECURITY_ADMIN` ， `init_security_config` 执行管理员校验 |
-| M05 | Claim/convert 路径缺少报价约束 | Medium | Fixed | `decrease_liquidity.rs` 已增加 `validate_price_floor_from_quote` |
+| M05 | Claim/convert 路径缺少报价约束 | Medium | Fixed | `decrease_liquidity.rs` 已增加 `validate_price_from_quote` 双向价格偏差校验 |
 | L01 | Cleanup swap 复用主 swap remaining | Low | Acknowledged | 已拆分四段 `remaining_accounts` ，cleanup 改为 best-effort |
-| L02 | Dust 判断用 USDC 常量比较任意 mint | Low | Fixed | 已改为基于目标侧估算输出判断 dust |
+| L02 | Dust 判断用 USDC 常量比较任意 mint | Low | Fixed | 当前协议仅支持 USDC 配对池；已改为统一比较 USDC 计价金额，而不是直接比较任意 mint 的 raw amount |
 | L03 | Dust 分支没收 100% reward | Low | Acknowledged | 保留既有产品语义 |
 | L04 | Fee token account 无 canonical ATA 约束 | Low | Fixed | 已强制 `fee_token0_account` / `fee_token1_account` 为 canonical ATA |
 | L05 | Farming reward 不计费 | Low | Acknowledged | 产品决策，不视为代码漏洞 |
@@ -73,6 +73,17 @@
 | LPH-021 | release 未开溢出检查 | Low | Fixed | 已启用 `overflow-checks = true` |
 
 **结论**: 前序审计中列出的核心安全问题已基本按预期落地，关键修复点均可在当前代码中验证到。
+
+### 2026-03-19 补充 fix review 验证
+
+本轮额外核对了 `audit/2023-03-19-degate_audit_report_before_fix_review.md` 中新增的 `M1`、`M2`、`M3`、`L2` 四项，结论如下：
+
+| 编号 | 问题 | 处理 | 验证结果 |
+|------|------|------|---------|
+| M1 | `calculate_transfer_fee_from_config` 对 `MAX_FEE_BASIS_POINTS` 特判冗余 | Fixed | `state/utils.rs` 已完全委托给 `calculate_epoch_fee`，不再保留特殊分支 |
+| M2 | 价格偏差校验仅覆盖单方向 | Fixed | `zap_common.rs` 已改为双向价格偏差校验 `validate_price_from_quote` |
+| M3 | 主 zap swap 价格边界未同时覆盖 `out-of-range -> in-range` | Fixed | `derive_main_swap_price_limit` 已按 `mode + direction` 同时覆盖两类边界 |
+| L2 | USDC 阈值比较口径需与协议范围一致 | Fixed | 当前协议仅支持 USDC 配对池；`decrease_liquidity.rs` 已统一比较 USDC 计价金额 |
 
 ---
 
@@ -130,6 +141,7 @@ transfer_fee_config
 * **remaining_accounts 仍依赖调用约定**: 当前不是对所有 `remaining_accounts` 做全量白名单扫描，而是只做分段和关键账户校验，这是有意识的资源权衡。
 * **native mint 路径较复杂**: 虽然按当前业务语义可接受，但该路径仍然比普通 SPL token 结算更容易积累边界复杂度。
 * **部分事件数据带估算性质**: decrease 路径中的 settled/reward 字段存在按比例拆分的近似过程，链下使用时需注意口径。
+* **USDC 配对池假设需持续明确**: `L02` 当前成立的基础，是协议范围明确限定为 USDC 配对池；若未来扩展到非 USDC/非 USDC 池，需要重新设计 dust threshold 机制。
 
 ---
 
@@ -138,13 +150,14 @@ transfer_fee_config
 本轮复审额外执行了以下验证：
 
 * 交叉核对 `audit/` 目录中既有审计报告、修复决策和当前源码实现
+* 交叉核对 `audit/2023-03-19-degate_audit_report_before_fix_review.md` 与 `audit/2026-03-19_fix_review_remediation_report_CN.md`
 * 运行库测试：
 
 ```bash
 SECURITY_ADMIN=11111111111111111111111111111111 cargo test -p lp_handler --lib
 ```
 
-结果： `31 passed; 0 failed`
+结果： `33 passed; 0 failed`
 
 说明：测试通过证明当前单元测试集可正常运行，但不能替代完整的集成测试与主网场景验证。
 

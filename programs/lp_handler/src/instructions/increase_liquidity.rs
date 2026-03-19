@@ -239,8 +239,7 @@ pub fn increase_liquidity<'a, 'b, 'c: 'info, 'info>(
         plan.balance_1_pre_cpi,
         plan.amount_0_max,
         plan.amount_1_max,
-        plan.cleanup_swap_remaining_input_token0,
-        plan.cleanup_swap_remaining_input_token1,
+        plan.swap_remaining,
         position_nft_mint,
     )?;
 

@@ -141,10 +141,6 @@ fn program_owned_lamports_ok(entry_lamports: u64, exit_lamports: u64) -> bool {
     exit_lamports <= entry_lamports
 }
 
-fn separator_count_matches(expected: u8, actual: usize) -> bool {
-    actual == usize::from(expected)
-}
-
 fn security_config_pools_len(data: &[u8]) -> Result<usize> {
     // Anchor discriminator(8) + authority(32) + Vec len(u32=4) + pools
     const HEADER: usize = 8 + 32 + 4;
@@ -281,7 +277,6 @@ pub fn resolve_policy<'info>(accounts: &[AccountInfo<'info>]) -> Result<Security
 pub fn entry_check_and_snapshot<'info>(
     accounts: &[AccountInfo<'info>],
     remaining_accounts: &[AccountInfo<'info>],
-    expected_separator_count: u8,
     pool_state: &AccountLoader<'info, PoolState>,
     signer: Pubkey,
     recipient: Pubkey,
@@ -291,22 +286,15 @@ pub fn entry_check_and_snapshot<'info>(
     let pool_state_key = pool_state.key();
 
     // LPH-007：recipient 参数必须是本次指令真实提供的账户之一（ctx.accounts 或 remaining_accounts）。
-    // 否则任意 recipient pubkey 会扩大安全层允许的 token authority 集合。
     let recipient_exists = accounts.iter().any(|a| a.key() == recipient);
     require!(recipient_exists, LpDepositError::RecipientNotInAccounts);
 
-    // remaining_accounts 分隔符（crate::ID）约束：
-    // - 由具体指令入口显式传入期望值
-    // - zap 新协议：3 个分隔符（main / action / cleanup_token0 / cleanup_token1）
-    // - decrease/claim 旧协议：1 个分隔符
+    // remaining_accounts 分隔符（crate::ID）约束：恰好出现 1 次
     let sep_cnt = remaining_accounts
         .iter()
         .filter(|a| a.key() == crate::ID)
         .count();
-    require!(
-        separator_count_matches(expected_separator_count, sep_cnt),
-        LpDepositError::SecuritySeparatorInvalid
-    );
+    require!(sep_cnt == 1, LpDepositError::SecuritySeparatorInvalid);
 
     // Pool 白名单（强制启用）：
     // - 必须提供 security_config PDA（账户需在列表中）
@@ -619,20 +607,4 @@ mod tests {
         assert!(!program_owned_lamports_ok(11, 12));
     }
 
-    #[test]
-    fn separator_count_accepts_matching_single_separator() {
-        assert!(separator_count_matches(1, 1));
-    }
-
-    #[test]
-    fn separator_count_accepts_matching_zap_dual_cleanup_protocol() {
-        assert!(separator_count_matches(3, 3));
-    }
-
-    #[test]
-    fn separator_count_rejects_mismatched_values() {
-        assert!(!separator_count_matches(1, 3));
-        assert!(!separator_count_matches(3, 1));
-        assert!(!separator_count_matches(3, 2));
-    }
 }

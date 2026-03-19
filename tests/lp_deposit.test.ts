@@ -24,7 +24,7 @@ import {
   TickUtils
 } from '@raydium-io/raydium-sdk-v2';
 import { ASSOCIATED_TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from '@solana/spl-token';
-import { buildCleanupSwapRemainingAccounts, quoteSwapRemainingAccounts, solveZapTwoSidedCLMM } from './utils';
+import { solveZapTwoSidedCLMM } from './utils';
 import {
   connection,
   deposit_amount,
@@ -152,33 +152,14 @@ describe('lp_deposit', () => {
     const amount0In = isMintA ? new BN(deposit_amount) : new BN(0);
     const amount1In = !isMintA ? new BN(deposit_amount) : new BN(0);
 
-    const cleanupSwapRemainingAccounts = await buildCleanupSwapRemainingAccounts({
-      tickArrayBitmapExtension,
-      mintAAddress: new PublicKey(poolKeys.mintA.address),
-      mintBAddress: new PublicKey(poolKeys.mintB.address),
-      amountAInBN: amount0In,
-      amountBInBN: amount1In,
-      mainSwapDirection: res.swapDirection,
-      mainSwapAmountIn: res.swapAmountIN,
-      mainSwapMinOut: res.swapMinOut,
-      amountAForPosition: res.amountAForPosition,
-      amountBForPosition: res.amountBForPosition,
-      quoteRemainingAccounts: async ({ amountIn, inputIsMintA }) =>
-        quoteSwapRemainingAccounts({
-          computePool,
-          tickArrayCache,
-          epochInfo,
-          amountIn,
-          inputIsMintA
-        })
-    });
-
+    // 分隔符
     remainingAccounts.push({
       pubkey: program.programId,
       isSigner: false,
       isWritable: false
     });
 
+    // action remaining accounts
     const tickArrayLowerStartIndex = TickUtils.getTickArrayStartIndexByTick(tickLower, poolInfo.config.tickSpacing);
     const tickArrayUpperStartIndex = TickUtils.getTickArrayStartIndexByTick(tickUpper, poolInfo.config.tickSpacing);
 
@@ -195,19 +176,6 @@ describe('lp_deposit', () => {
         isWritable: true
       });
     }
-
-    remainingAccounts.push({
-      pubkey: program.programId,
-      isSigner: false,
-      isWritable: false
-    });
-    remainingAccounts.push(...cleanupSwapRemainingAccounts.inputToken0);
-    remainingAccounts.push({
-      pubkey: program.programId,
-      isSigner: false,
-      isWritable: false
-    });
-    remainingAccounts.push(...cleanupSwapRemainingAccounts.inputToken1);
     const swapInputIsToken0 = res.swapDirection === ZapSwapDirection.AtoB;
     const quotedSqrtPriceX64 = overrides?.quotedSqrtPriceX64 ?? new BN(computePool.sqrtPriceX64.toString());
     // returnMint 可选：传入则会在链上把剩余统一换回该 mint；不传则不做剩余兑换

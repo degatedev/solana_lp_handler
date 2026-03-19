@@ -83,14 +83,22 @@ fn derive_main_swap_price_limit(
     tick_upper_index: i32,
     swap_input_is_token0: bool,
     mode: QuotedZapMode,
+    current_sqrt_price_x64: u128,
 ) -> Result<u128> {
     use QuotedZapMode::*;
-    match (swap_input_is_token0, mode) {
-        (true, InRange) => get_sqrt_price_at_tick(tick_lower_index),
-        (false, InRange) => get_sqrt_price_at_tick(tick_upper_index),
-        (true, OutOfRangeToken1Only) => get_sqrt_price_at_tick(tick_upper_index),
-        (false, OutOfRangeToken0Only) => get_sqrt_price_at_tick(tick_lower_index),
-        _ => err!(LpDepositError::InvalidDepositAmount),
+    let tick_price = match (swap_input_is_token0, mode) {
+        (true, InRange) => get_sqrt_price_at_tick(tick_lower_index)?,
+        (false, InRange) => get_sqrt_price_at_tick(tick_upper_index)?,
+        (true, OutOfRangeToken1Only) => get_sqrt_price_at_tick(tick_upper_index)?,
+        (false, OutOfRangeToken0Only) => get_sqrt_price_at_tick(tick_lower_index)?,
+        _ => return err!(LpDepositError::InvalidDepositAmount),
+    };
+    if swap_input_is_token0 {
+        // zero_for_one: limit 必须 < current_price
+        if tick_price < current_sqrt_price_x64 { Ok(tick_price) } else { Ok(0) }
+    } else {
+        // not zero_for_one: limit 必须 > current_price
+        if tick_price > current_sqrt_price_x64 { Ok(tick_price) } else { Ok(0) }
     }
 }
 ```
@@ -99,6 +107,7 @@ fn derive_main_swap_price_limit(
 
 * `InRange` 时，限制价格不要离开区间
 * `OutOfRangeToken1Only` / `OutOfRangeToken0Only` 时，限制价格不要进入区间
+* 若池价因定点数舍入已越过 tick 边界，传 0 放弃限价（边界已失效，`swap_min_out` 仍提供滑点保护）
 
 ## `L2`
 
@@ -132,5 +141,23 @@ fn should_skip_claim_only_dust_swap(
 }
 ```
 
-因此，本项当前定性为 `Fixed` 。  
+因此，本项当前定性为 `Fixed` 。
 若未来协议范围扩展到非 USDC/非 USDC 池，当前实现不能直接沿用，需要增加 `mint -> threshold` 配置或其他等价机制。
+
+---
+
+## L01 回退说明：Cleanup swap remaining accounts 恢复为复用主 swap
+
+**原始修复**: 将 remaining_accounts 从两段 `[swap, SEP, action]` 扩展为四段 `[swap, SEP, action, SEP, cleanup_token0, SEP, cleanup_token1]`，为 cleanup swap 提供独立的 tick arrays。
+
+**回退原因**: 该修复在实际部署后引入了比原始问题更严重的回归：
+
+1. **tick array 不匹配**: cleanup tick arrays 在链下基于主 swap 前的价格计算，但链上执行时主 swap 已大幅移动价格，导致 Raydium CPI 失败（`InvalidFirstTickArrayAccount`）
+2. **tickArrayCache 覆盖不足**: 链下 `tickArrayCache` 仅覆盖当前 tick 附近的有限范围。尝试基于 post-swap 价格报价时，如果主 swap 将价格推到 cache 范围之外，则完全无法为 cleanup swap 计算有效的 tick arrays
+3. **审计建议的前提不可行**: 审计原文指出"客户端必须基于预测的 post-main-swap + post-action 状态计算 swap_back_remaining"，但在实践中链下无法可靠预测 post-swap 池子状态
+
+**复用主 swap tick arrays 的合理性**: 主 swap 的 tick arrays 覆盖了从 pre-swap tick 到 post-swap tick 的完整路径。cleanup swap 从 post-swap tick 出发，其起始 tick array 必然在主 swap 的 tick arrays 中。Raydium 的 swap 逻辑会扫描所有提供的 tick arrays 找到匹配的 start_tick_index，不要求顺序或方向一致。对于 cleanup swap 的小金额场景，覆盖范围充足。
+
+**残余风险**: 仅在极端边界情况下（主 swap 恰好停在 tick array 边界且 cleanup 需要跨越到下一个 tick array）可能失败。此时交易回滚，用户资金不受影响，重试即可。概率极低，不涉及资金安全。
+
+**当前状态**: `Acknowledged` — 回退为复用方案，remaining_accounts 恢复为两段 `[swap, SEP, action]`。

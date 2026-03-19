@@ -128,12 +128,10 @@ pub struct ZapPlan<'info> {
     pub balance_1_pre_cpi: u64,
 
     /// swap_v2 所需 remaining accounts（来自 ctx.remaining_accounts 的 slice，不在这里分配 Vec）
+    /// cleanup swap 也复用此 slice：主 swap 的 tick arrays 覆盖了 pre→post-swap 的完整路径。
     pub swap_remaining: &'info [AccountInfo<'info>],
     /// open_position/increase_liquidity 所需 remaining accounts（来自 ctx.remaining_accounts 的 slice）
     pub action_remaining: &'info [AccountInfo<'info>],
-    /// cleanup swap 所需 remaining accounts（链下同时传入两套候选路径）
-    pub cleanup_swap_remaining_input_token0: &'info [AccountInfo<'info>],
-    pub cleanup_swap_remaining_input_token1: &'info [AccountInfo<'info>],
 
     pub amount_0_max: u64,
     pub amount_1_max: u64,
@@ -202,80 +200,56 @@ fn validate_quoted_mode_and_price(
 /// M3 修复：根据 mode 区分 in-range 和 out-of-range 的 price limit 方向。
 /// - InRange: 防止 swap 将价格推出范围
 /// - OutOfRange: 防止 swap 将价格推入范围
+///
+/// Raydium 要求 zero_for_one 时 limit < current_price，
+/// not zero_for_one 时 limit > current_price。
+/// 当池价因定点数舍入已越过 tick 边界时，强制设 limit 会导致 RequireGteViolated。
+/// 此时传 0 让 Raydium 使用默认极值（MIN/MAX_SQRT_PRICE），放弃边界保护——
+/// 边界已被越过，保护已无意义，swap_min_out 仍提供滑点兜底。
 fn derive_main_swap_price_limit(
     tick_lower_index: i32,
     tick_upper_index: i32,
     swap_input_is_token0: bool,
     mode: QuotedZapMode,
+    current_sqrt_price_x64: u128,
 ) -> Result<u128> {
     use QuotedZapMode::*;
-    match (swap_input_is_token0, mode) {
-        // InRange: 卖 token0 价格下降 → 停在 lower tick
-        (true, InRange) => get_sqrt_price_at_tick(tick_lower_index),
-        // InRange: 卖 token1 价格上升 → 停在 upper tick
-        (false, InRange) => get_sqrt_price_at_tick(tick_upper_index),
-        // OutOfRangeToken1Only: 卖 token0 价格下降 → 停在 upper tick（防止进入范围）
-        (true, OutOfRangeToken1Only) => get_sqrt_price_at_tick(tick_upper_index),
-        // OutOfRangeToken0Only: 卖 token1 价格上升 → 停在 lower tick（防止进入范围）
-        (false, OutOfRangeToken0Only) => get_sqrt_price_at_tick(tick_lower_index),
-        // 其他组合已被 mode 验证阻止（如 out-of-range-token0-only 时不应卖 token0）
-        _ => err!(LpDepositError::InvalidDepositAmount),
-    }
-}
-
-fn split_zap_remaining_accounts<'info>(
-    remaining_accounts: &'info [AccountInfo<'info>],
-) -> Result<(
-    &'info [AccountInfo<'info>],
-    &'info [AccountInfo<'info>],
-    &'info [AccountInfo<'info>],
-    &'info [AccountInfo<'info>],
-)> {
-    let sep = crate::ID;
-    let first_sep = remaining_accounts
-        .iter()
-        .position(|a| a.key() == sep)
-        .ok_or(LpDepositError::InvalidRemainingAccounts)?;
-    let second_sep_relative = remaining_accounts[first_sep + 1..]
-        .iter()
-        .position(|a| a.key() == sep)
-        .ok_or(LpDepositError::InvalidRemainingAccounts)?;
-    let second_sep = first_sep + 1 + second_sep_relative;
-    let third_sep_relative = remaining_accounts[second_sep + 1..]
-        .iter()
-        .position(|a| a.key() == sep)
-        .ok_or(LpDepositError::InvalidRemainingAccounts)?;
-    let third_sep = second_sep + 1 + third_sep_relative;
-
-    let swap_remaining = &remaining_accounts[..first_sep];
-    let action_remaining = &remaining_accounts[first_sep + 1..second_sep];
-    let cleanup_swap_remaining_input_token0 = &remaining_accounts[second_sep + 1..third_sep];
-    let cleanup_swap_remaining_input_token1 = &remaining_accounts[third_sep + 1..];
-
-    require!(
-        !cleanup_swap_remaining_input_token0.is_empty()
-            && !cleanup_swap_remaining_input_token1.is_empty(),
-        LpDepositError::InvalidRemainingAccounts
-    );
-
-    Ok((
-        swap_remaining,
-        action_remaining,
-        cleanup_swap_remaining_input_token0,
-        cleanup_swap_remaining_input_token1,
-    ))
-}
-
-fn select_cleanup_remaining_accounts<'info>(
-    cleanup_input_token0: &'info [AccountInfo<'info>],
-    cleanup_input_token1: &'info [AccountInfo<'info>],
-    input_is_token0: bool,
-) -> &'info [AccountInfo<'info>] {
-    if input_is_token0 {
-        cleanup_input_token0
+    let tick_price = match (swap_input_is_token0, mode) {
+        (true, InRange) => get_sqrt_price_at_tick(tick_lower_index)?,
+        (false, InRange) => get_sqrt_price_at_tick(tick_upper_index)?,
+        (true, OutOfRangeToken1Only) => get_sqrt_price_at_tick(tick_upper_index)?,
+        (false, OutOfRangeToken0Only) => get_sqrt_price_at_tick(tick_lower_index)?,
+        _ => return err!(LpDepositError::InvalidDepositAmount),
+    };
+    if swap_input_is_token0 {
+        // zero_for_one: limit 必须 < current_price
+        if tick_price < current_sqrt_price_x64 {
+            Ok(tick_price)
+        } else {
+            Ok(0) // 价格已越过边界，放弃限价
+        }
     } else {
-        cleanup_input_token1
+        // not zero_for_one: limit 必须 > current_price
+        if tick_price > current_sqrt_price_x64 {
+            Ok(tick_price)
+        } else {
+            Ok(0) // 价格已越过边界，放弃限价
+        }
     }
+}
+
+/// remaining_accounts 两段拆分：[swap_remaining, SEP, action_remaining]
+fn split_remaining_accounts<'info>(
+    remaining_accounts: &'info [AccountInfo<'info>],
+) -> Result<(&'info [AccountInfo<'info>], &'info [AccountInfo<'info>])> {
+    let sep = crate::ID;
+    let sep_index = remaining_accounts
+        .iter()
+        .position(|a| a.key() == sep)
+        .ok_or(LpDepositError::InvalidRemainingAccounts)?;
+    let swap_remaining = &remaining_accounts[..sep_index];
+    let action_remaining = &remaining_accounts[sep_index + 1..];
+    Ok((swap_remaining, action_remaining))
 }
 
 fn finalize_return_amounts_for_target_token0(
@@ -435,12 +409,8 @@ pub fn prepare_zap_plan_and_swap_if_needed<'info>(
         }
     }
 
-    let (
-        swap_remaining_slice,
-        action_remaining_slice,
-        cleanup_swap_remaining_input_token0_slice,
-        cleanup_swap_remaining_input_token1_slice,
-    ) = split_zap_remaining_accounts(remaining_accounts)?;
+    let (swap_remaining_slice, action_remaining_slice) =
+        split_remaining_accounts(remaining_accounts)?;
 
     // 执行主配平 swap（plan 指定，最多一次）
     let mut amount_0_max = amount_0_in;
@@ -451,8 +421,13 @@ pub fn prepare_zap_plan_and_swap_if_needed<'info>(
     if swap_amount_in > 0 {
         // price limit 只在实际 swap 时计算；当 swap_amount_in == 0 时
         // mode 不约束 swap_input_is_token0，延迟计算避免走到无效分支。
-        let main_swap_price_limit_x64 =
-            derive_main_swap_price_limit(tick_lower_index, tick_upper_index, swap_input_is_token0, quoted_mode)?;
+        let main_swap_price_limit_x64 = derive_main_swap_price_limit(
+            tick_lower_index,
+            tick_upper_index,
+            swap_input_is_token0,
+            quoted_mode,
+            sqrt_price_x64_now,
+        )?;
         swap_v2_common(
             accounts,
             swap_amount_in,
@@ -568,8 +543,6 @@ pub fn prepare_zap_plan_and_swap_if_needed<'info>(
         balance_1_pre_cpi,
         swap_remaining: swap_remaining_slice,
         action_remaining: action_remaining_slice,
-        cleanup_swap_remaining_input_token0: cleanup_swap_remaining_input_token0_slice,
-        cleanup_swap_remaining_input_token1: cleanup_swap_remaining_input_token1_slice,
         amount_0_max,
         amount_1_max,
         base_flag,
@@ -590,8 +563,7 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
     balance_1_pre_cpi: u64,
     amount_0_max: u64,
     amount_1_max: u64,
-    cleanup_swap_remaining_input_token0: &'info [AccountInfo<'info>],
-    cleanup_swap_remaining_input_token1: &'info [AccountInfo<'info>],
+    swap_remaining: &'info [AccountInfo<'info>],
     position_nft_mint: Pubkey,
 ) -> Result<(u64, u64)> {
     accounts.signer_token0_account().reload()?;
@@ -676,43 +648,27 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
                 let min = if vault0_is_usdc { min_out } else { leftover_1 };
                 // 大于0.001 usdc 才swap，避免 swap 过小失败
                 if min >= crate::consts::MIN_USDC_SWAP_AMOUNT {
-                    let cleanup_swap_remaining = select_cleanup_remaining_accounts(
-                        cleanup_swap_remaining_input_token0,
-                        cleanup_swap_remaining_input_token1,
-                        false,
-                    );
-                    let cleanup_result = swap_v2_common(
+                    swap_v2_common(
                         accounts,
                         leftover_1,
                         min_out,
                         0,
                         false,
-                        cleanup_swap_remaining.to_vec(),
-                    );
-                    match cleanup_result {
-                        Ok(()) => {
-                            accounts.signer_token0_account().reload()?;
-                            out_from_swap = accounts
-                                .signer_token0_account()
-                                .amount
-                                .checked_sub(before0)
-                                .unwrap_or_else(|| {
-                                    msg!(
-                                        "WARN: out_from_swap underflow (to token0): after={}, before={}",
-                                        accounts.signer_token0_account().amount,
-                                        before0
-                                    );
-                                    0
-                                });
-                        }
-                        Err(err) => {
+                        swap_remaining.to_vec(),
+                    )?;
+                    accounts.signer_token0_account().reload()?;
+                    out_from_swap = accounts
+                        .signer_token0_account()
+                        .amount
+                        .checked_sub(before0)
+                        .unwrap_or_else(|| {
                             msg!(
-                                "WARN: cleanup swap token1->token0 failed, keep leftovers on user accounts: {:?}",
-                                err
+                                "WARN: out_from_swap underflow (to token0): after={}, before={}",
+                                accounts.signer_token0_account().amount,
+                                before0
                             );
-                            kept_other = true;
-                        }
-                    }
+                            0
+                        });
                 } else {
                     // 如果 min_out <= 0，则不进行 swap，把剩余的 token1 直接转账给 fee
                     // 如果剩余 mint 是 wSOL(native mint)，则不转给 fee（保持留在用户侧，函数末尾会统一 close/unwrap 成 SOL）
@@ -767,43 +723,27 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
                 )?;
                 let min = if vault0_is_usdc { leftover_0 } else { min_out };
                 if min >= crate::consts::MIN_USDC_SWAP_AMOUNT {
-                    let cleanup_swap_remaining = select_cleanup_remaining_accounts(
-                        cleanup_swap_remaining_input_token0,
-                        cleanup_swap_remaining_input_token1,
-                        true,
-                    );
-                    let cleanup_result = swap_v2_common(
+                    swap_v2_common(
                         accounts,
                         leftover_0,
                         min_out,
                         0,
                         true,
-                        cleanup_swap_remaining.to_vec(),
-                    );
-                    match cleanup_result {
-                        Ok(()) => {
-                            accounts.signer_token1_account().reload()?;
-                            out_from_swap = accounts
-                                .signer_token1_account()
-                                .amount
-                                .checked_sub(before1)
-                                .unwrap_or_else(|| {
-                                    msg!(
-                                        "WARN: out_from_swap underflow (to token1): after={}, before={}",
-                                        accounts.signer_token1_account().amount,
-                                        before1
-                                    );
-                                    0
-                                });
-                        }
-                        Err(err) => {
+                        swap_remaining.to_vec(),
+                    )?;
+                    accounts.signer_token1_account().reload()?;
+                    out_from_swap = accounts
+                        .signer_token1_account()
+                        .amount
+                        .checked_sub(before1)
+                        .unwrap_or_else(|| {
                             msg!(
-                                "WARN: cleanup swap token0->token1 failed, keep leftovers on user accounts: {:?}",
-                                err
+                                "WARN: out_from_swap underflow (to token1): after={}, before={}",
+                                accounts.signer_token1_account().amount,
+                                before1
                             );
-                            kept_other = true;
-                        }
-                    }
+                            0
+                        });
                 } else {
                     // 如果 min_out <= 0，则不进行 swap，把剩余的 token0 直接转账给 fee
                     // 如果剩余 mint 是 wSOL(native mint)，则不转给 fee（保持留在用户侧，函数末尾会统一 close/unwrap 成 SOL）
@@ -1194,52 +1134,8 @@ fn transfer_token_common_accounts<'info>(
 }
 
 #[cfg(test)]
-fn split_zap_remaining_keys(
-    keys: &[Pubkey],
-) -> Result<(Vec<Pubkey>, Vec<Pubkey>, Vec<Pubkey>, Vec<Pubkey>)> {
-    let first_sep = keys
-        .iter()
-        .position(|key| *key == crate::ID)
-        .ok_or(LpDepositError::InvalidRemainingAccounts)?;
-    let second_sep_relative = keys[first_sep + 1..]
-        .iter()
-        .position(|key| *key == crate::ID)
-        .ok_or(LpDepositError::InvalidRemainingAccounts)?;
-    let second_sep = first_sep + 1 + second_sep_relative;
-    let third_sep_relative = keys[second_sep + 1..]
-        .iter()
-        .position(|key| *key == crate::ID)
-        .ok_or(LpDepositError::InvalidRemainingAccounts)?;
-    let third_sep = second_sep + 1 + third_sep_relative;
-
-    let swap = keys[..first_sep].to_vec();
-    let action = keys[first_sep + 1..second_sep].to_vec();
-    let cleanup_input_token0 = keys[second_sep + 1..third_sep].to_vec();
-    let cleanup_input_token1 = keys[third_sep + 1..].to_vec();
-    require!(
-        !cleanup_input_token0.is_empty() && !cleanup_input_token1.is_empty(),
-        LpDepositError::InvalidRemainingAccounts
-    );
-    Ok((swap, action, cleanup_input_token0, cleanup_input_token1))
-}
-
-#[cfg(test)]
-fn select_cleanup_keys<'a>(
-    cleanup_input_token0: &'a [Pubkey],
-    cleanup_input_token1: &'a [Pubkey],
-    input_is_token0: bool,
-) -> &'a [Pubkey] {
-    if input_is_token0 {
-        cleanup_input_token0
-    } else {
-        cleanup_input_token1
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
-    use anchor_lang::prelude::Pubkey;
     use raydium_amm_v3::libraries::get_sqrt_price_at_tick;
 
     #[test]
@@ -1302,91 +1198,41 @@ mod tests {
     }
 
     #[test]
-    fn main_swap_price_limit_in_range_uses_lower_tick_when_selling_token0() {
+    fn price_limit_enforces_boundary_when_price_inside_range() {
+        let current = get_sqrt_price_at_tick(0).unwrap(); // 在 [-100, 200] 内
         let limit =
-            derive_main_swap_price_limit(-100, 200, true, QuotedZapMode::InRange).unwrap();
+            derive_main_swap_price_limit(-100, 200, true, QuotedZapMode::InRange, current)
+                .unwrap();
         assert_eq!(limit, get_sqrt_price_at_tick(-100).unwrap());
     }
 
     #[test]
-    fn main_swap_price_limit_in_range_uses_upper_tick_when_selling_token1() {
+    fn price_limit_falls_back_to_zero_when_price_past_boundary() {
+        let boundary = get_sqrt_price_at_tick(-100).unwrap();
+        let current = boundary - 2; // 已越过下界
         let limit =
-            derive_main_swap_price_limit(-100, 200, false, QuotedZapMode::InRange).unwrap();
+            derive_main_swap_price_limit(-100, 200, true, QuotedZapMode::InRange, current)
+                .unwrap();
+        assert_eq!(limit, 0);
+    }
+
+    #[test]
+    fn price_limit_selling_token1_enforces_upper_boundary() {
+        let current = get_sqrt_price_at_tick(0).unwrap();
+        let limit =
+            derive_main_swap_price_limit(-100, 200, false, QuotedZapMode::InRange, current)
+                .unwrap();
         assert_eq!(limit, get_sqrt_price_at_tick(200).unwrap());
     }
 
     #[test]
-    fn main_swap_price_limit_out_of_range_token1_only_uses_upper_tick_when_selling_token0() {
+    fn price_limit_out_of_range_enforces_boundary() {
+        let current = get_sqrt_price_at_tick(300).unwrap(); // upper 上方
         let limit = derive_main_swap_price_limit(
-            -100,
-            200,
-            true,
-            QuotedZapMode::OutOfRangeToken1Only,
+            -100, 200, true, QuotedZapMode::OutOfRangeToken1Only, current,
         )
         .unwrap();
         assert_eq!(limit, get_sqrt_price_at_tick(200).unwrap());
-    }
-
-    #[test]
-    fn main_swap_price_limit_out_of_range_token0_only_uses_lower_tick_when_selling_token1() {
-        let limit = derive_main_swap_price_limit(
-            -100,
-            200,
-            false,
-            QuotedZapMode::OutOfRangeToken0Only,
-        )
-        .unwrap();
-        assert_eq!(limit, get_sqrt_price_at_tick(-100).unwrap());
-    }
-
-    #[test]
-    fn split_zap_remaining_accounts_supports_explicit_cleanup_segment() {
-        let sep = crate::ID;
-        let a = Pubkey::new_unique();
-        let b = Pubkey::new_unique();
-        let c = Pubkey::new_unique();
-        let d = Pubkey::new_unique();
-
-        let (swap, action, cleanup_input_token0, cleanup_input_token1) =
-            split_zap_remaining_keys(&[a, sep, b, sep, c, sep, d]).unwrap();
-
-        assert_eq!(swap, vec![a]);
-        assert_eq!(action, vec![b]);
-        assert_eq!(cleanup_input_token0, vec![c]);
-        assert_eq!(cleanup_input_token1, vec![d]);
-    }
-
-    #[test]
-    fn split_zap_remaining_accounts_rejects_missing_cleanup_separator() {
-        let a = Pubkey::new_unique();
-        let b = Pubkey::new_unique();
-        let c = Pubkey::new_unique();
-
-        let err = split_zap_remaining_keys(&[a, crate::ID, b, crate::ID, c]).unwrap_err();
-
-        assert_eq!(err, LpDepositError::InvalidRemainingAccounts.into());
-    }
-
-    #[test]
-    fn select_cleanup_keys_uses_token0_candidate_when_cleanup_input_is_token0() {
-        let cleanup_input_token0 = vec![Pubkey::new_unique()];
-        let cleanup_input_token1 = vec![Pubkey::new_unique()];
-
-        let selected =
-            select_cleanup_keys(&cleanup_input_token0, &cleanup_input_token1, true).to_vec();
-
-        assert_eq!(selected, cleanup_input_token0);
-    }
-
-    #[test]
-    fn select_cleanup_keys_uses_token1_candidate_when_cleanup_input_is_token1() {
-        let cleanup_input_token0 = vec![Pubkey::new_unique()];
-        let cleanup_input_token1 = vec![Pubkey::new_unique()];
-
-        let selected =
-            select_cleanup_keys(&cleanup_input_token0, &cleanup_input_token1, false).to_vec();
-
-        assert_eq!(selected, cleanup_input_token1);
     }
 
     #[test]

@@ -33,7 +33,7 @@
 | M03 | Zap swap 无价格边界保护 | Medium | Fixed | 主 swap 已增加 `sqrt_price_limit_x64` ，并按 `QuotedZapMode + swap direction` 同时覆盖 `in-range` 与 `out-of-range` 边界 |
 | M04 | SecurityConfig init 可被抢跑 | Medium | Fixed | `build.rs` 注入 `SECURITY_ADMIN` ， `init_security_config` 执行管理员校验 |
 | M05 | Claim/convert 路径缺少报价约束 | Medium | Fixed | `decrease_liquidity.rs` 已增加 `validate_price_from_quote` 双向价格偏差校验 |
-| L01 | Cleanup swap 复用主 swap remaining | Low | Acknowledged | 已拆分四段 `remaining_accounts` ，cleanup 改为 best-effort |
+| L01 | Cleanup swap 复用主 swap remaining | Low | Acknowledged | 回退为复用主 swap tick arrays，remaining_accounts 为两段 `[swap, SEP, action]`，详见 fix review 报告 |
 | L02 | Dust 判断用 USDC 常量比较任意 mint | Low | Fixed | 当前协议仅支持 USDC 配对池；已改为统一比较 USDC 计价金额，而不是直接比较任意 mint 的 raw amount |
 | L03 | Dust 分支没收 100% reward | Low | Acknowledged | 保留既有产品语义 |
 | L04 | Fee token account 无 canonical ATA 约束 | Low | Fixed | 已强制 `fee_token0_account` / `fee_token1_account` 为 canonical ATA |
@@ -119,8 +119,8 @@ transfer_fee_config
 1. **wSOL / native mint 账户关闭语义**
 `zap_common.rs` 与 `decrease_liquidity.rs` 在 native mint 路径会 close 对应 token account，将余额还原成原生 SOL。根据当前业务说明，这就是预期行为。
 
-2. **Cleanup swap best-effort**
-   cleanup swap 失败时不回滚主流程，剩余资产留在用户账户。这是可接受的可用性与复杂度权衡。
+2. **Cleanup swap**
+   cleanup swap 复用主 swap 的 tick arrays。若 CPI 失败则整笔交易回滚，用户资金不受影响。
 
 3. **fee_percent 可由调用侧控制**
    当前属于产品设计允许的灵活费率模型，不单独记为安全漏洞。
@@ -157,7 +157,7 @@ transfer_fee_config
 SECURITY_ADMIN=11111111111111111111111111111111 cargo test -p lp_handler --lib
 ```
 
-结果： `33 passed; 0 failed`
+结果： `26 passed; 0 failed`
 
 说明：测试通过证明当前单元测试集可正常运行，但不能替代完整的集成测试与主网场景验证。
 

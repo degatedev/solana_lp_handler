@@ -38,7 +38,7 @@
 | M03 | Zap swap 无价格边界保护 | Medium | Fixed | `derive_main_swap_price_limit` 基于 `QuotedZapMode + direction` 同时覆盖 in-range 和 out-of-range 边界 |
 | M04 | SecurityConfig init 可被抢跑 | Medium | Fixed | `build.rs` 编译期注入 `SECURITY_ADMIN`，`security_config.rs` init 时校验 |
 | M05 | Claim/convert 路径缺少报价约束 | Medium | Fixed | `decrease_liquidity.rs` 添加 `validate_price_from_quote` 双向价格偏差校验 |
-| L01 | Cleanup swap 复用主 swap remaining | Low | Acknowledged | 已拆分为四段 remaining_accounts（main_swap / action / cleanup_token0 / cleanup_token1），cleanup 为 best-effort |
+| L01 | Cleanup swap 复用主 swap remaining | Low | Acknowledged | 回退为复用主 swap 的 tick arrays，remaining_accounts 为两段 `[swap, SEP, action]`。四段方案因链下无法可靠计算 post-swap tick arrays 而引发回归，详见 fix review 报告 |
 | L02 | Dust 判断用 USDC 常量比较任意 mint | Low | Fixed | 统一以 USDC 计价金额与 `MIN_USDC_SWAP_AMOUNT` 比较；target 为 USDC 用输出估算值，target 非 USDC 用输入值（即 USDC 侧） |
 | L03 | Dust 分支没收 100% reward | Low | Acknowledged | 保留业务设计 |
 | L04 | Fee token account 无 canonical ATA 约束 | Low | Fixed | `decrease_liquidity.rs` 强制验证 fee_token0/1_account 为 canonical ATA |
@@ -140,7 +140,7 @@
 **缓解因素**:
 * 金额通常很小（CPI 后的 leftover）
 * 有 `min_out` 保护
-* 失败不回滚主流程（best-effort，catch Err 后保留 leftover）
+* cleanup swap 失败会回滚整笔交易（CPI 错误不可捕获）
 * 对应 Adevar L01，已 Acknowledged
 
 **建议**: 维持当前设计，加强链下监控。
@@ -188,16 +188,15 @@ SECURITY_ADMIN=11111111111111111111111111111111 cargo test -p lp_handler --lib
 ```
 
 ```
-running 33 tests
-test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+running 26 tests
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 ```
 
 测试覆盖包括：
 - 安全层 lamport 检查（快照相对比较）
-- 分隔符数量校验（单/多分隔符协议）
+- 分隔符校验
 - 价格偏差双向校验
 - 主 swap price limit 四种模式
-- Cleanup swap 账户选择
 - Tick array PDA 地址校验
 - Tick 参数与仓位一致性
 - Dust 阈值判断

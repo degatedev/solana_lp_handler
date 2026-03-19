@@ -83,14 +83,22 @@ fn derive_main_swap_price_limit(
     tick_upper_index: i32,
     swap_input_is_token0: bool,
     mode: QuotedZapMode,
+    current_sqrt_price_x64: u128,
 ) -> Result<u128> {
     use QuotedZapMode::*;
-    match (swap_input_is_token0, mode) {
-        (true, InRange) => get_sqrt_price_at_tick(tick_lower_index),
-        (false, InRange) => get_sqrt_price_at_tick(tick_upper_index),
-        (true, OutOfRangeToken1Only) => get_sqrt_price_at_tick(tick_upper_index),
-        (false, OutOfRangeToken0Only) => get_sqrt_price_at_tick(tick_lower_index),
-        _ => err!(LpDepositError::InvalidDepositAmount),
+    let tick_price = match (swap_input_is_token0, mode) {
+        (true, InRange) => get_sqrt_price_at_tick(tick_lower_index)?,
+        (false, InRange) => get_sqrt_price_at_tick(tick_upper_index)?,
+        (true, OutOfRangeToken1Only) => get_sqrt_price_at_tick(tick_upper_index)?,
+        (false, OutOfRangeToken0Only) => get_sqrt_price_at_tick(tick_lower_index)?,
+        _ => return err!(LpDepositError::InvalidDepositAmount),
+    };
+    if swap_input_is_token0 {
+        // zero_for_one: limit must be < current_price
+        if tick_price < current_sqrt_price_x64 { Ok(tick_price) } else { Ok(0) }
+    } else {
+        // not zero_for_one: limit must be > current_price
+        if tick_price > current_sqrt_price_x64 { Ok(tick_price) } else { Ok(0) }
     }
 }
 ```
@@ -99,6 +107,7 @@ Specifically:
 
 * In `InRange`, the limit prevents price from leaving the position range
 * In `OutOfRangeToken1Only` / `OutOfRangeToken0Only`, the limit prevents price from entering the range
+* If the pool price has already crossed the tick boundary due to fixed-point rounding, 0 is passed to disable the limit (the boundary is already breached; `swap_min_out` still provides slippage protection)
 
 ## `L2`
 
@@ -132,5 +141,23 @@ fn should_skip_claim_only_dust_swap(
 }
 ```
 
-Accordingly, this item is currently classified as `Fixed`.  
+Accordingly, this item is currently classified as `Fixed`.
 If the protocol scope is later expanded to support non-USDC/non-USDC pools, this implementation should not be reused as-is and would need a `mint -> threshold` configuration or an equivalent mechanism.
+
+---
+
+## L01 Revert: Cleanup swap remaining accounts reverted to reusing main swap
+
+**Original fix**: Extended remaining_accounts from two segments `[swap, SEP, action]` to four segments `[swap, SEP, action, SEP, cleanup_token0, SEP, cleanup_token1]`, providing independent tick arrays for the cleanup swap.
+
+**Reason for revert**: The fix introduced regressions more severe than the original issue after deployment:
+
+1. **Tick array mismatch**: Cleanup tick arrays were computed off-chain at the pre-main-swap price, but on-chain the main swap had already moved the price significantly, causing Raydium CPI failure (`InvalidFirstTickArrayAccount`)
+2. **Insufficient tickArrayCache coverage**: The off-chain `tickArrayCache` only covers a limited range around the current tick. When attempting to quote at the post-swap price, the post-swap tick may fall outside the cache range, making it impossible to compute valid cleanup tick arrays
+3. **Audit recommendation's prerequisite is infeasible**: The original audit states "the client must compute swap_back_remaining against the predicted post-main-swap and post-action state," but reliably predicting the post-swap pool state off-chain is not practical
+
+**Why reusing main swap tick arrays works**: The main swap's tick arrays cover the full path from pre-swap tick to post-swap tick. The cleanup swap starts from the post-swap tick, so its starting tick array is guaranteed to be present in the main swap's tick arrays. Raydium's swap logic scans all provided tick arrays to find the matching `start_tick_index`, regardless of order or direction. For the small amounts involved in cleanup swaps, the coverage is sufficient.
+
+**Residual risk**: Failure is possible only in an extreme edge case where the main swap stops exactly at a tick array boundary and the cleanup needs to cross into the next tick array. In that case the transaction reverts, user funds are unaffected, and a retry succeeds. The probability is very low and there is no fund-safety concern.
+
+**Current status**: `Acknowledged` — reverted to reuse approach, remaining_accounts restored to two segments `[swap, SEP, action]`.

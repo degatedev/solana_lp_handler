@@ -93,13 +93,7 @@ fn derive_main_swap_price_limit(
         (false, OutOfRangeToken0Only) => get_sqrt_price_at_tick(tick_lower_index)?,
         _ => return err!(LpDepositError::InvalidDepositAmount),
     };
-    if swap_input_is_token0 {
-        // zero_for_one: limit 必须 < current_price
-        if tick_price < current_sqrt_price_x64 { Ok(tick_price) } else { Ok(0) }
-    } else {
-        // not zero_for_one: limit 必须 > current_price
-        if tick_price > current_sqrt_price_x64 { Ok(tick_price) } else { Ok(0) }
-    }
+    Ok(tick_price)
 }
 ```
 
@@ -107,7 +101,6 @@ fn derive_main_swap_price_limit(
 
 * `InRange` 时，限制价格不要离开区间
 * `OutOfRangeToken1Only` / `OutOfRangeToken0Only` 时，限制价格不要进入区间
-* 若池价因定点数舍入已越过 tick 边界，传 0 放弃限价（边界已失效，`swap_min_out` 仍提供滑点保护）
 
 ## `L2`
 
@@ -148,7 +141,7 @@ fn should_skip_claim_only_dust_swap(
 
 ## L01 回退说明：Cleanup swap remaining accounts 恢复为复用主 swap
 
-**原始修复**: 将 remaining_accounts 从两段 `[swap, SEP, action]` 扩展为四段 `[swap, SEP, action, SEP, cleanup_token0, SEP, cleanup_token1]`，为 cleanup swap 提供独立的 tick arrays。
+**原始修复**: 将 remaining_accounts 从两段 `[swap, SEP, action]` 扩展为四段 `[swap, SEP, action, SEP, cleanup_token0, SEP, cleanup_token1]` ，为 cleanup swap 提供独立的 tick arrays。
 
 **回退原因**: 该修复在实际部署后引入了比原始问题更严重的回归：
 
@@ -160,4 +153,4 @@ fn should_skip_claim_only_dust_swap(
 
 **残余风险**: 仅在极端边界情况下（主 swap 恰好停在 tick array 边界且 cleanup 需要跨越到下一个 tick array）可能失败。此时交易回滚，用户资金不受影响，重试即可。概率极低，不涉及资金安全。
 
-**当前状态**: `Acknowledged` — 回退为复用方案，remaining_accounts 恢复为两段 `[swap, SEP, action]`。
+**当前状态**: `Acknowledged` — 回退为复用方案，remaining_accounts 恢复为两段 `[swap, SEP, action]` 。

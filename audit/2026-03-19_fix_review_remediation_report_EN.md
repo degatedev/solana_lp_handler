@@ -3,15 +3,15 @@
 **Date**: 2026-03-19  
 **Audit Source**: `audit/2023-03-19-degate_audit_report_before_fix_review.md`
 
-This document only covers the four items raised in this supplemental fix review: `M1`, `M2`, `M3`, and `L2`.
+This document only covers the four items raised in this supplemental fix review: `M1` , `M2` , `M3` , and `L2` .
 
 ## Decisions
 
 | Issue | Decision | Notes |
 | --- | --- | --- |
-| `M1` | `Fixed` | `calculate_transfer_fee_from_config` now fully delegates to SPL Token-2022 `calculate_epoch_fee` and no longer keeps a special branch for `MAX_FEE_BASIS_POINTS`. |
+| `M1` | `Fixed` | `calculate_transfer_fee_from_config` now fully delegates to SPL Token-2022 `calculate_epoch_fee` and no longer keeps a special branch for `MAX_FEE_BASIS_POINTS` . |
 | `M2` | `Fixed` | Price deviation validation is now symmetric and no longer protects only against one-sided price drops. |
-| `M3` | `Fixed` | The main zap swap `sqrt_price_limit_x64` now covers both `in-range` and `out-of-range` boundaries based on `QuotedZapMode + swap direction`. |
+| `M3` | `Fixed` | The main zap swap `sqrt_price_limit_x64` now covers both `in-range` and `out-of-range` boundaries based on `QuotedZapMode + swap direction` . |
 | `L2` | `Fixed` | The protocol currently supports USDC-paired pools only; within that protocol scope, the current dust-threshold logic is accurate. |
 
 ## `M1`
@@ -93,13 +93,7 @@ fn derive_main_swap_price_limit(
         (false, OutOfRangeToken0Only) => get_sqrt_price_at_tick(tick_lower_index)?,
         _ => return err!(LpDepositError::InvalidDepositAmount),
     };
-    if swap_input_is_token0 {
-        // zero_for_one: limit must be < current_price
-        if tick_price < current_sqrt_price_x64 { Ok(tick_price) } else { Ok(0) }
-    } else {
-        // not zero_for_one: limit must be > current_price
-        if tick_price > current_sqrt_price_x64 { Ok(tick_price) } else { Ok(0) }
-    }
+    Ok(tick_price)
 }
 ```
 
@@ -107,14 +101,13 @@ Specifically:
 
 * In `InRange`, the limit prevents price from leaving the position range
 * In `OutOfRangeToken1Only` / `OutOfRangeToken0Only`, the limit prevents price from entering the range
-* If the pool price has already crossed the tick boundary due to fixed-point rounding, 0 is passed to disable the limit (the boundary is already breached; `swap_min_out` still provides slippage protection)
 
 ## `L2`
 
 The protocol currently **supports USDC-paired pools only**.  
 Within that scope, the current implementation is internally consistent:
 
-* If the target token is USDC, `swap_other_amount_threshold` is used because it is the target-side minimum output denominated in USDC
+* If the target token is USDC,  `swap_other_amount_threshold` is used because it is the target-side minimum output denominated in USDC
 * If the target token is not USDC, the other side must be USDC, so `total_other_in` itself is already a USDC-denominated amount
 
 Current implementation:
@@ -141,14 +134,14 @@ fn should_skip_claim_only_dust_swap(
 }
 ```
 
-Accordingly, this item is currently classified as `Fixed`.
+Accordingly, this item is currently classified as `Fixed` .
 If the protocol scope is later expanded to support non-USDC/non-USDC pools, this implementation should not be reused as-is and would need a `mint -> threshold` configuration or an equivalent mechanism.
 
 ---
 
 ## L01 Revert: Cleanup swap remaining accounts reverted to reusing main swap
 
-**Original fix**: Extended remaining_accounts from two segments `[swap, SEP, action]` to four segments `[swap, SEP, action, SEP, cleanup_token0, SEP, cleanup_token1]`, providing independent tick arrays for the cleanup swap.
+**Original fix**: Extended remaining_accounts from two segments `[swap, SEP, action]` to four segments `[swap, SEP, action, SEP, cleanup_token0, SEP, cleanup_token1]` , providing independent tick arrays for the cleanup swap.
 
 **Reason for revert**: The fix introduced regressions more severe than the original issue after deployment:
 
@@ -156,8 +149,8 @@ If the protocol scope is later expanded to support non-USDC/non-USDC pools, this
 2. **Insufficient tickArrayCache coverage**: The off-chain `tickArrayCache` only covers a limited range around the current tick. When attempting to quote at the post-swap price, the post-swap tick may fall outside the cache range, making it impossible to compute valid cleanup tick arrays
 3. **Audit recommendation's prerequisite is infeasible**: The original audit states "the client must compute swap_back_remaining against the predicted post-main-swap and post-action state," but reliably predicting the post-swap pool state off-chain is not practical
 
-**Why reusing main swap tick arrays works**: The main swap's tick arrays cover the full path from pre-swap tick to post-swap tick. The cleanup swap starts from the post-swap tick, so its starting tick array is guaranteed to be present in the main swap's tick arrays. Raydium's swap logic scans all provided tick arrays to find the matching `start_tick_index`, regardless of order or direction. For the small amounts involved in cleanup swaps, the coverage is sufficient.
+**Why reusing main swap tick arrays works**: The main swap's tick arrays cover the full path from pre-swap tick to post-swap tick. The cleanup swap starts from the post-swap tick, so its starting tick array is guaranteed to be present in the main swap's tick arrays. Raydium's swap logic scans all provided tick arrays to find the matching `start_tick_index` , regardless of order or direction. For the small amounts involved in cleanup swaps, the coverage is sufficient.
 
 **Residual risk**: Failure is possible only in an extreme edge case where the main swap stops exactly at a tick array boundary and the cleanup needs to cross into the next tick array. In that case the transaction reverts, user funds are unaffected, and a retry succeeds. The probability is very low and there is no fund-safety concern.
 
-**Current status**: `Acknowledged` — reverted to reuse approach, remaining_accounts restored to two segments `[swap, SEP, action]`.
+**Current status**: `Acknowledged` — reverted to reuse approach, remaining_accounts restored to two segments `[swap, SEP, action]` .

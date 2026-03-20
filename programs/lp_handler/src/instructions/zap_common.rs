@@ -203,15 +203,13 @@ fn validate_quoted_mode_and_price(
 ///
 /// Raydium 要求 zero_for_one 时 limit < current_price，
 /// not zero_for_one 时 limit > current_price。
-/// 当池价因定点数舍入已越过 tick 边界时，强制设 limit 会导致 RequireGteViolated。
-/// 此时传 0 让 Raydium 使用默认极值（MIN/MAX_SQRT_PRICE），放弃边界保护——
-/// 边界已被越过，保护已无意义，swap_min_out 仍提供滑点兜底。
+/// 当池价已越过 tick 边界时，说明用户 quoted_mode 的意图已被违反，
+/// 应直接 revert 让用户以正确的 quoted_mode 重试，而非放弃限价继续执行。
 fn derive_main_swap_price_limit(
     tick_lower_index: i32,
     tick_upper_index: i32,
     swap_input_is_token0: bool,
     mode: QuotedZapMode,
-    current_sqrt_price_x64: u128,
 ) -> Result<u128> {
     use QuotedZapMode::*;
     let tick_price = match (swap_input_is_token0, mode) {
@@ -221,21 +219,7 @@ fn derive_main_swap_price_limit(
         (false, OutOfRangeToken0Only) => get_sqrt_price_at_tick(tick_lower_index)?,
         _ => return err!(LpDepositError::InvalidDepositAmount),
     };
-    if swap_input_is_token0 {
-        // zero_for_one: limit 必须 < current_price
-        if tick_price < current_sqrt_price_x64 {
-            Ok(tick_price)
-        } else {
-            Ok(0) // 价格已越过边界，放弃限价
-        }
-    } else {
-        // not zero_for_one: limit 必须 > current_price
-        if tick_price > current_sqrt_price_x64 {
-            Ok(tick_price)
-        } else {
-            Ok(0) // 价格已越过边界，放弃限价
-        }
-    }
+    Ok(tick_price)
 }
 
 /// remaining_accounts 两段拆分：[swap_remaining, SEP, action_remaining]
@@ -426,7 +410,6 @@ pub fn prepare_zap_plan_and_swap_if_needed<'info>(
             tick_upper_index,
             swap_input_is_token0,
             quoted_mode,
-            sqrt_price_x64_now,
         )?;
         swap_v2_common(
             accounts,
@@ -1199,39 +1182,21 @@ mod tests {
 
     #[test]
     fn price_limit_enforces_boundary_when_price_inside_range() {
-        let current = get_sqrt_price_at_tick(0).unwrap(); // 在 [-100, 200] 内
-        let limit =
-            derive_main_swap_price_limit(-100, 200, true, QuotedZapMode::InRange, current)
-                .unwrap();
+        let limit = derive_main_swap_price_limit(-100, 200, true, QuotedZapMode::InRange).unwrap();
         assert_eq!(limit, get_sqrt_price_at_tick(-100).unwrap());
     }
 
     #[test]
-    fn price_limit_falls_back_to_zero_when_price_past_boundary() {
-        let boundary = get_sqrt_price_at_tick(-100).unwrap();
-        let current = boundary - 2; // 已越过下界
-        let limit =
-            derive_main_swap_price_limit(-100, 200, true, QuotedZapMode::InRange, current)
-                .unwrap();
-        assert_eq!(limit, 0);
-    }
-
-    #[test]
     fn price_limit_selling_token1_enforces_upper_boundary() {
-        let current = get_sqrt_price_at_tick(0).unwrap();
-        let limit =
-            derive_main_swap_price_limit(-100, 200, false, QuotedZapMode::InRange, current)
-                .unwrap();
+        let limit = derive_main_swap_price_limit(-100, 200, false, QuotedZapMode::InRange).unwrap();
         assert_eq!(limit, get_sqrt_price_at_tick(200).unwrap());
     }
 
     #[test]
     fn price_limit_out_of_range_enforces_boundary() {
-        let current = get_sqrt_price_at_tick(300).unwrap(); // upper 上方
-        let limit = derive_main_swap_price_limit(
-            -100, 200, true, QuotedZapMode::OutOfRangeToken1Only, current,
-        )
-        .unwrap();
+        let limit =
+            derive_main_swap_price_limit(-100, 200, true, QuotedZapMode::OutOfRangeToken1Only)
+                .unwrap();
         assert_eq!(limit, get_sqrt_price_at_tick(200).unwrap());
     }
 

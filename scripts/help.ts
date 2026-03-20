@@ -48,7 +48,7 @@ export const getProgramId = async () => {
   const response = await prompt<{ programId: string }>({
     type: 'input',
     name: 'programId',
-    message: '请输入需要关闭的合约programId'
+    message: '请输入合约programId'
   });
   const programId = response.programId;
   if (!programId) {

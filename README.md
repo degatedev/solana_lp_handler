@@ -1,376 +1,379 @@
-# lp_handler 合约技术文档
+# lp_handler Contract Technical Documentation
 
- 
+## Table of Contents
 
-## 目录
+- [1. Contract Overview and Positioning](#1-contract-overview-and-positioning)
+- [2. ProgramId and External Dependencies](#2-programid-and-external-dependencies)
+- [3. Overall Data Flow (Two Instructions)](#3-overall-data-flow-two-instructions)
+- [4. Instruction 1: swap_and_deposit](#4-instruction-1-swap_and_deposit)
+  * [4.1 Entry Point and Parameters](#41-entry-point-and-parameters)
+  * [4.2 Account Model and Key Constraints](#42-account-model-and-key-constraints)
+  * [4.3 Execution Steps](#43-execution-steps)
+  * [4.4 remainingAccounts Rules](#44-remainingaccounts-rules)
+  * [4.5 Reference Test Cases (Calling Convention)](#45-reference-test-cases-calling-convention)
+- [5. Instruction 2: decrease_liquidity](#5-instruction-2-decrease_liquidity)
+  * [5.1 Entry Point and Parameters](#51-entry-point-and-parameters)
+  * [5.2 Account Model and Key Constraints](#52-account-model-and-key-constraints)
+  * [5.3 remainingAccounts Separator Protocol (Critical)](#53-remainingaccounts-separator-protocol-critical)
+  * [5.4 principal vs reward and the Fee Model (Critical)](#54-principal-vs-reward-and-the-fee-model-critical)
+  * [5.5 Conversion Path convert_to_usdc=true (Implementation Semantics: Convert to Target Token)](#55-conversion-path-convert_to_usdctrue-implementation-semantics-convert-to-target-token)
+- [6. Events (Observability)](#6-events-observability)
+- [7. Error Codes and Common Troubleshooting](#7-error-codes-and-common-troubleshooting)
+- [8. Trust Boundaries and Security Considerations](#8-trust-boundaries-and-security-considerations)
+- [9. Mapping to Test Cases](#9-mapping-to-test-cases)
+- [10. Example Transactions](#10-example-transactions)
 
-* [1. 合约概览与定位](#1-合约概览与定位)
-* [2. ProgramId 与外部依赖](#2-programid-与外部依赖)
-* [3. 总体数据流（两条指令）](#3-总体数据流两条指令)
-* [4. 指令一：swap_and_deposit](#4-指令一swap_and_deposit)
-  + [4.1 入口与参数](#41-入口与参数)
-  + [4.2 账户模型与关键约束](#42-账户模型与关键约束)
-  + [4.3 执行步骤](#43-执行步骤)
-  + [4.4 remainingAccounts 规则](#44-remainingaccounts-规则)
-  + [4.5 对照测试用例（调用约定）](#45-对照测试用例调用约定)
-* [5. 指令二：decrease_liquidity](#5-指令二decrease_liquidity)
-  + [5.1 入口与参数](#51-入口与参数)
-  + [5.2 账户模型与关键约束](#52-账户模型与关键约束)
-  + [5.3 remainingAccounts 分隔符协议（关键）](#53-remainingaccounts-分隔符协议关键)
-  + [5.4 principal vs reward 与抽成模型（关键）](#54-principal-vs-reward-与抽成模型关键)
-  + [5.5 兑换路径 convert_to_usdc=true（实现语义：兑换到目标币种）](#55-兑换路径-convert_to_usdctrue实现语义兑换到目标币种)
-* [6. 事件（可观测性）](#6-事件可观测性)
-* [7. 错误码与常见排查](#7-错误码与常见排查)
-* [8. 信任边界与安全注意事项](#8-信任边界与安全注意事项)
-* [9. 与测试用例的对应关系](#9-与测试用例的对应关系)
-* [10. 交易示例](#10-交易示例)
+## Reference Code Locations
 
-## 参考代码位置
-
-* 程序入口：`programs/lp_handler/src/lib.rs`
-* 存入逻辑：`programs/lp_handler/src/instructions/swap_and_deposit.rs`
-* 退出/领奖逻辑：`programs/lp_handler/src/instructions/decrease_liquidity.rs`
-* 事件/错误/工具函数：`programs/lp_handler/src/state/`
-* 调用方式示例：`tests/lp_deposit.test.ts`、`tests/lp_withdraw.test.ts`、`tests/lp_claim.test.ts`
+- Program entry point: `programs/lp_handler/src/lib.rs`
+- Deposit logic: `programs/lp_handler/src/instructions/swap_and_deposit.rs`
+- Exit / claim logic: `programs/lp_handler/src/instructions/decrease_liquidity.rs`
+- Events / errors / utility functions: `programs/lp_handler/src/state/`
+- Usage examples: `tests/lp_deposit.test.ts`, `tests/lp_withdraw.test.ts`, `tests/lp_claim.test.ts`
 
 ---
 
-## 1. 合约概览与定位
+## 1. Contract Overview and Positioning
 
-`lp_handler` 是一个 **Raydium CLMM（AmmV3）“组合交易/仓位操作”封装层**，把用户侧常见的两类动作做成稳定的链上入口：
+`lp_handler` is a **Raydium CLMM (AmmV3) "composed transaction / position operation" wrapper layer**. It turns the two most common user-side actions into stable on-chain entry points:
 
-* **存入侧**：单边资金 ->（必要时 swap）-> 开仓加流动性
-* **退出/领奖侧**：减仓/领奖 ->（可选先 swap 归一）-> **只对奖励/手续费抽成**
+- **Deposit side**: single-sided funds -> (swap if necessary) -> open a position and add liquidity
+- **Exit / claim side**: decrease liquidity or claim -> (optionally swap to normalize first) -> **take a fee on rewards/trading fees only**
 
-核心目标：
+Core goals:
 
-* **降低集成复杂度**：把 Raydium CLMM 的多次 CPI 串成单条指令；
-* **内置关键约束**：tick 区间、mint 合法性、fee 收款白名单、Position NFT ATA 推导一致性、remaining accounts 基础校验；
-* **可观测性**：对 swap、加仓、减仓/领奖提供事件。
+- **Reduce integration complexity**: chain multiple Raydium CLMM CPIs into a single instruction;
+- **Built-in critical constraints**: tick range, mint validity, fee-recipient whitelist, consistency of Position NFT ATA derivation, and basic validation of remaining accounts;
+- **Observability**: emit events for swap, liquidity increase, and liquidity decrease/claim.
 
 ---
 
-## 2. ProgramId 与外部依赖
+## 2. ProgramId and External Dependencies
 
 ### ProgramId
 
-`lib.rs` 中 `declare_id!` 固定为主网 ProgramId（仓库注释说明本分支统一使用 mainnet 地址）。
+`declare_id!` in `lib.rs` is fixed to the mainnet ProgramId (the repository comments note that this branch uses the mainnet address consistently).
 
-### 外部依赖
+### External Dependencies
 
-* **Raydium CLMM**：`raydium_amm_v3`
-  + CPI：`swap_v2`、`open_position_with_token22_nft`、`decrease_liquidity_v2`
-* **Anchor SPL**：Token / Token2022 / ATA / Memo
-* **合约内部工具**：`programs/lp_handler/src/state/utils.rs`
-  + 滑点 `calc_min_amount_out`、`apply_slippage_bps_floor`
-  + 最优 swap 比例估算 `calculate_optimal_swap_amount`
-  + 本金计算 `calculate_principal_amounts_for_liquidity`
-  + ATA 推导 `derive_ata_address`
-* **抽成白名单**：`programs/lp_handler/src/state/consts.rs`
+- **Raydium CLMM**: `raydium_amm_v3`
+  * CPIs: `swap_v2`, `open_position_with_token22_nft`, `decrease_liquidity_v2`
+- **Anchor SPL**: Token / Token2022 / ATA / Memo
+- **Internal contract utilities**: `programs/lp_handler/src/state/utils.rs`
+  * Slippage: `calc_min_amount_out`, `apply_slippage_bps_floor`
+  * Optimal swap ratio estimation: `calculate_optimal_swap_amount`
+  * Principal calculation: `calculate_principal_amounts_for_liquidity`
+  * ATA derivation: `derive_ata_address`
+- **Fee whitelist**: `programs/lp_handler/src/state/consts.rs`
 
 ---
 
-## 3. 总体数据流（两条指令）
+## 3. Overall Data Flow (Two Instructions)
 
 #### `swap_and_deposit`
 
-1. User 调用 `swap_and_deposit(amount_0_in, amount_1_in, return_mint, tick_lower, tick_upper, slippage_bps, swap_amount_in, swap_min_out, swap_input_is_token0)`
-2. 合约读取 `pool_state`，在链上决定本次执行 swap 的方向与数量（最多一次 swap）：
-  + **出区间**：允许“单边投入”，合约会覆盖链下 plan，把不需要的一侧全量换成需要的一侧
-  + **区间跨现价**：使用调用方传入的 `swap_amount_in/swap_min_out/swap_input_is_token0` 作为 swap 计划
-3. 如需 swap：CPI 调用 Raydium `swap_v2`（tick arrays/bitmap 由 remaining accounts 提供）
-4. CPI 调用 Raydium `open_position_with_token22_nft`，铸造 Position NFT（Token2022）并开仓
-5. 处理“剩余”：可选将剩余归一到 `return_mint`；若 `min_out == 0` 则按规则处理（非 wSOL → 转 fee；wSOL → 留给用户并在末尾 close/unwrap 成 SOL）
-6. 事件：`IncreaseLiquidityEvent`（包含 `return_amount_0/return_amount_1`）
+1. The user calls `swap_and_deposit(amount_0_in, amount_1_in, return_mint, tick_lower, tick_upper, slippage_bps, swap_amount_in, swap_min_out, swap_input_is_token0)`
+2. The contract reads `pool_state` and decides on-chain the direction and amount of the swap to execute (at most one swap):
+
+- **Out of range**: "single-sided deposit" is allowed; the contract overrides the off-chain plan and swaps the entire unneeded side into the needed side
+- **Range straddles the current price**: the caller-supplied `swap_amount_in` / `swap_min_out` / `swap_input_is_token0` are used as the swap plan
+
+3. If a swap is required: CPI into Raydium `swap_v2` (tick arrays / bitmap are supplied via remaining accounts)
+4. CPI into Raydium `open_position_with_token22_nft` to mint the Position NFT (Token2022) and open the position
+5. Handle the "leftovers": optionally normalize the leftovers into `return_mint`; if `min_out == 0`, handle them per the rules (non-wSOL → transfer to fee; wSOL → leave with the user and close/unwrap into SOL at the end)
+6. Event: `IncreaseLiquidityEvent` (includes `return_amount_0` / `return_amount_1`)
 
 #### `decrease_liquidity`
 
-1. User 调用 `decrease_liquidity(liquidity, mint_amount_0, mint_amount_1, swap_to_token_mint, slippage_bps, fee_percent, convert_to_usdc)`
-2. 合约校验 `fee_owner` 白名单与 fee ATA
-3. CPI 调用 Raydium `decrease_liquidity_v2`（奖励相关 remaining accounts 在分隔符之后）
-4. 通过“余额增量 delta - principal_expected”拆分 reward；仅对 reward 抽成
-5. 若 `convert_to_usdc=true`：可能再 CPI `swap_v2` 把 reward/principal 兑换到目标币种后再扣费
-6. 事件：`DecreaseLiquidityEvent`
----
-
-## 4. 指令一： `swap_and_deposit`
-
-### 4.1 入口与参数
-
-入口： `programs/lp_handler/src/lib.rs` -> `instructions::swap_and_deposit`
-
-参数语义：
-
-* `amount_0_in: u64`：本次允许的 token0 最大投入量（最小单位）
-* `amount_1_in: u64`：本次允许的 token1 最大投入量（最小单位）
-* `return_mint: Option<Pubkey>`：可选；若提供则必须等于池子 token0 或 token1 的 mint，用于“把剩余尽量归一到某一边”
-* `tick_lower_index/tick_upper_index: i32`：仓位 tick 区间，要求 `lower < upper`
-* `slippage_bps: u16`：滑点（bps），该指令中要求 `< 5000`
-* `swap_amount_in: u64 / swap_min_out: u64 / swap_input_is_token0: bool`：
-  + 区间跨现价时，作为“链下 plan”输入（最多执行一次 swap）
-  + 出区间时，合约会覆盖该 plan，改为把不需要的一侧全量换成需要的一侧（仍会用 `slippage_bps` 计算 min_out）
-
-### 4.2 账户模型与关键约束
-
-Accounts： `SwapAndDeposit<'info>`
-
-关键约束点（非穷尽）：
-
-* `raydium_clmm_program` 必须是 `raydium_amm_v3::ID`
-* `pool_state.load()?.amm_config == amm_config.key()`
-* `token_vault_0/1` 必须匹配 `pool_state.load()?.token_vault_0/1`
-* `user_token0_account` 的 mint 必须是 `token_vault_0.mint`；`user_token1_account` 同理
-* **Position NFT（Token2022）ATA 地址校验**：
-  + `position_nft_account` 必须等于 `ATA(position_nft_owner, position_nft_mint, TOKEN_2022_PROGRAM_ID)`
-  + 注意：合约只校验“地址推导是否正确”，允许 ATA 尚未创建（由 CPI 创建）
-
-### 4.3 执行步骤
-
-1. 参数校验：tick 区间、`return_mint` 合法性、slippage 上限
-2. 读池状态：`sqrt_price_x64`、`tick_spacing`，判断是否“出区间”
-3. 决定本次执行 swap（最多一次）：
-  + 出区间：合约覆盖 plan，执行“单边转双边”的全量 swap
-  + 区间跨现价：使用调用方传入的 plan 参数
-4. 如需 swap：计算 `min_out` 并 CPI 调用 Raydium `swap_v2`
-5. 计算 `amount_0_max/amount_1_max` 作为开仓上限（swap 后余额 + 输入预算）
-6. CPI 调用 Raydium `open_position_with_token22_nft`
-7. 处理剩余并发事件：`swap_back_remaining_and_emit_increase_event`
-  + `return_mint=None`：两边剩余都保留在用户 token account
-  + `return_mint=Some(token0/token1)`：尽量把另一边剩余兑换为目标币种；若 `min_out == 0`：
-    - 非 wSOL：该侧剩余转给 `fee_token*_account`
-    - wSOL：不转 fee，留给用户，并在末尾 close/unwrap 成 SOL
-8. 发 `IncreaseLiquidityEvent`（新增字段 `return_amount_0/return_amount_1`）
-
-#### `return_amount_0/return_amount_1` 口径（case-by-case）
-
-在 `swap_back_remaining_and_emit_increase_event` 中：
-
-* `leftover_0 = amount_0_max - spent_0`
-* `leftover_1 = amount_1_max - spent_1`
-* `return_amount_0/return_amount_1` 是事件里记录的“最终留给用户的剩余”口径（留在用户的 `signer_token0/1_account` 里；若 mint 是 wSOL，后面会 close/unwrap 成 SOL）。
-
-Case 1： `return_mint == None` （不要求把剩余统一换成某一边）
-
-* `return_amount_0 = leftover_0`
-* `return_amount_1 = leftover_1`
-
-Case 2： `return_mint == token0` （希望把 token1 剩余换成 token0）
-
-* **2.1** `leftover_1 == 0`
-  + `return_amount_0 = leftover_0`
-  + `return_amount_1 = 0`
-* **2.2** `leftover_1 > 0` 且 `min_out > 0`（执行 swap token1→token0）
-  + `return_amount_0 = leftover_0 + out_from_swap`
-  + `return_amount_1 = 0`
-* **2.3** `leftover_1 > 0` 且 `min_out == 0`（不 swap）
-  + **2.3.a** token1 不是 wSOL：`leftover_1` 转给 fee
-    - `return_amount_0 = leftover_0`
-    - `return_amount_1 = 0`
-  + **2.3.b** token1 是 wSOL：`leftover_1` 不转 fee，留给用户（后面 close→SOL）
-    - `return_amount_0 = leftover_0`
-    - `return_amount_1 = leftover_1`
-
-Case 3： `return_mint == token1` （希望把 token0 剩余换成 token1）
-
-* **3.1** `leftover_0 == 0`
-  + `return_amount_1 = leftover_1`
-  + `return_amount_0 = 0`
-* **3.2** `leftover_0 > 0` 且 `min_out > 0`（执行 swap token0→token1）
-  + `return_amount_1 = leftover_1 + out_from_swap`
-  + `return_amount_0 = 0`
-* **3.3** `leftover_0 > 0` 且 `min_out == 0`（不 swap）
-  + **3.3.a** token0 不是 wSOL：`leftover_0` 转给 fee
-    - `return_amount_1 = leftover_1`
-    - `return_amount_0 = 0`
-  + **3.3.b** token0 是 wSOL：`leftover_0` 不转 fee，留给用户（后面 close→SOL）
-    - `return_amount_1 = leftover_1`
-    - `return_amount_0 = leftover_0`
-
-额外说明（wSOL & rent）：
-
-* `close_account` 会把 token account 的 lamports 全部转走，因此 **rent 也会一起转走**。
-* 事件里的 `return_amount_*` 记录的是 token `amount` 口径（不含 rent）；实际钱包收到的 SOL 会比该数值多一点点（包含 rent）。
-
-### 4.4 remainingAccounts 规则
-
-`swap_and_deposit` 的 `ctx.remaining_accounts` **只用于 Raydium `swap_v2` **：
-
-* 结构：`[bitmap_extension?] + [swap_tick_array_0..N]`
-* 不允许把 open_position 需要的 tick arrays 混进 remaining（lower/upper 已作为固定账户传入）
-
-合约对 remaining 做了轻量校验：
-
-* 数量 `<= 32`
-* 每个账户 `owner` 必须等于 `raydium_clmm_program`
-
-### 4.5 对照测试用例（调用约定）
-
-参考： `tests/lp_deposit.test.ts`
-
-* 用 Raydium SDK 计算 swap 需要的 tick arrays，按顺序塞到 `remainingAccounts`
-* `positionNftMint` 用 `Keypair.generate()` 生成并作为签名者
-* `positionNftAccount` 采用 Token2022 的 ATA 推导（`getATAAddress(user, mint, TOKEN_2022_PROGRAM_ID)`）
-* 交易层通常会提高 compute limit/price
+1. The user calls `decrease_liquidity(liquidity, mint_amount_0, mint_amount_1, swap_to_token_mint, slippage_bps, fee_percent, convert_to_usdc)`
+2. The contract validates the `fee_owner` whitelist and the fee ATAs
+3. CPI into Raydium `decrease_liquidity_v2` (reward-related remaining accounts come after the separator)
+4. Split out the reward via "balance delta - principal_expected"; the fee is charged on the reward only
+5. If `convert_to_usdc=true`: possibly CPI into `swap_v2` again to convert reward/principal into the target token before deducting the fee
+6. Event: `DecreaseLiquidityEvent`
 
 ---
 
-## 5. 指令二： `decrease_liquidity`
+## 4. Instruction 1: `swap_and_deposit`
 
-### 5.1 入口与参数
+### 4.1 Entry Point and Parameters
 
-入口： `programs/lp_handler/src/lib.rs` -> `instructions::decrease_liquidity`
+Entry point: `programs/lp_handler/src/lib.rs` -> `instructions::swap_and_deposit`
 
-参数语义：
+Parameter semantics:
 
-* `liquidity: u128`
-  + `>0`：典型 withdraw（本金 + 奖励）
-  + `=0`：典型 claim（只领奖励；principal 视为 0）
-* `mint_amount_0/mint_amount_1: u64`：传给 Raydium `decrease_liquidity_v2` 的参数（测试里多为 0）
-* `swap_to_token_mint: Pubkey`：目标 mint（仅在 `convert_to_usdc=true` 时生效），必须是池子 token0 或 token1
-* `slippage_bps: u16`：`<= 5000`
-* `fee_percent: u16`：抽成比例（bps），`<= 10000`
-* `convert_to_usdc: bool`：实现语义是“兑换到目标币种”（名称偏业务）
+- `amount_0_in: u64`: maximum token0 input allowed for this call (smallest unit)
+- `amount_1_in: u64`: maximum token1 input allowed for this call (smallest unit)
+- `return_mint: Option<Pubkey>`: optional; if provided it must equal the pool's token0 or token1 mint, and is used to "normalize the leftovers into one side as far as possible"
+- `tick_lower_index` / `tick_upper_index: i32`: the position's tick range; requires `lower < upper`
+- `slippage_bps: u16`: slippage (bps); this instruction requires `< 5000`
+- `swap_amount_in: u64` / `swap_min_out: u64` / `swap_input_is_token0: bool`:
+  * When the range straddles the current price, these serve as the "off-chain plan" input (at most one swap is executed)
+  * When out of range, the contract overrides this plan and instead swaps the entire unneeded side into the needed side (`slippage_bps` is still used to compute `min_out`)
 
-### 5.2 账户模型与关键约束
+### 4.2 Account Model and Key Constraints
 
-Accounts： `DecreaseLiquidity<'info>`
+Accounts: `SwapAndDeposit<'info>`
 
-关键约束：
+Key constraints (non-exhaustive):
 
-* `fee_owner` 必须命中 `security_config` PDA 中的 `fee_owners` 白名单（运行时校验）
-* `fee_token0_account/fee_token1_account` 必须是 fee_owner 对应 mint 的 **ATA**
-  + 并且会校验 `mint`、`owner`
-  + ATA 推导时 token_program 使用 vault mint 账户的 `owner`（兼容 SPL Token / Token2022）
+- `raydium_clmm_program` must be `raydium_amm_v3::ID`
+- `pool_state.load()?.amm_config == amm_config.key()`
+- `token_vault_0/1` must match `pool_state.load()?.token_vault_0/1`
+- The mint of `user_token0_account` must be `token_vault_0.mint`; likewise for `user_token1_account`
+- **Position NFT (Token2022) ATA address validation**:
+  * `position_nft_account` must equal `ATA(position_nft_owner, position_nft_mint, TOKEN_2022_PROGRAM_ID)`
+  * Note: the contract only validates that the address derivation is correct; the ATA is allowed not to exist yet (it will be created by the CPI)
 
-### 5.3 remainingAccounts 分隔符协议（关键）
+### 4.3 Execution Steps
 
-`decrease_liquidity` 需要同时服务两类 CPI remaining：
+1. Validate parameters: tick range, validity of `return_mint`, slippage upper bound
+2. Read pool state: `sqrt_price_x64`, `tick_spacing`; determine whether the position is "out of range"
+3. Decide the swap to execute (at most one):
 
-* swap_v2 的 tick arrays/bitmap
-* decrease_liquidity_v2 的奖励相关 remaining
+- Out of range: the contract overrides the plan and executes a full "single-sided to double-sided" swap
+- Range straddles the current price: use the plan parameters supplied by the caller
 
-合约使用 ** `lp_handler programId` 作为分隔符**：
+4. If a swap is needed: compute `min_out` and CPI into Raydium `swap_v2`
+5. Compute `amount_0_max` / `amount_1_max` as the upper bounds for opening the position (post-swap balance + input budget)
+6. CPI into Raydium `open_position_with_token22_nft`
+7. Handle leftovers and emit the event: `swap_back_remaining_and_emit_increase_event`
 
-* 在 `ctx.remaining_accounts` 中找到第一个 `pubkey == crate::ID` 的位置
-* 分隔符前：`swap_remaining`
-* 分隔符后（跳过分隔符本身）：`decrease_remaining`
+- `return_mint=None`: leftovers on both sides stay in the user's token accounts
+- `return_mint=Some(token0/token1)`: convert the other side's leftovers into the target token as far as possible; if `min_out == 0`:
+  * Non-wSOL: that side's leftovers are transferred to `fee_token*_account`
+  * wSOL: not transferred to fee; left with the user and closed/unwrapped into SOL at the end
 
-缺分隔符会直接报 `InvalidRemainingAccounts` 。
+8. Emit `IncreaseLiquidityEvent` (with the new `return_amount_0` / `return_amount_1` fields)
 
-对照测试（ `tests/lp_withdraw.test.ts` / `tests/lp_claim.test.ts` ）的 remainingAccounts 构造顺序：
+#### `return_amount_0` / `return_amount_1` semantics (case by case)
 
-1. push swap_remaining（bitmap_extension? + tick arrays）
-2. push 分隔符：`{ pubkey: program.programId, ... }`
-3. push decrease_remaining（可能含 bitmap_extension + 每个 reward 的三元组：poolRewardVault、ownerRewardVault、rewardMint）
+Inside `swap_back_remaining_and_emit_increase_event`:
 
-### 5.4 principal vs reward 与抽成模型（关键）
+- `leftover_0 = amount_0_max - spent_0`
+- `leftover_1 = amount_1_max - spent_1`
+- `return_amount_0` / `return_amount_1` record, in the event, the "leftovers ultimately returned to the user" (i.e. what stays in the user's `signer_token0/1_account`; if the mint is wSOL it will later be closed/unwrapped into SOL).
 
-该指令的设计关键点是：**只对 reward（手续费/奖励）抽成，不对 principal（本金）抽成**。
+Case 1: `return_mint == None` (no requirement to normalize leftovers into one side)
 
-实现口径：
+- `return_amount_0 = leftover_0`
+- `return_amount_1 = leftover_1`
 
-* 先 CPI 调用 Raydium `decrease_liquidity_v2`
-* 通过用户 token0/token1 ATA 的 **余额增量**得到 `delta0/delta1`
-* 计算 principal：
-  + `liquidity == 0`：principal 视为 0（claim 语义）
-  + `liquidity > 0`：用当前价格与区间估算 `principal_expected_0/1`
-* `reward_gross = delta - principal_expected`（使用 `saturating_sub`，避免出现负数）
-* 抽成：`integrator_fee = reward_gross * fee_percent / 10000`
+Case 2: `return_mint == token0` (convert token1 leftovers into token0)
 
-### 5.5 兑换路径 convert_to_usdc=true（实现语义：兑换到目标币种）
+- **2.1** `leftover_1 == 0`
+  * `return_amount_0 = leftover_0`
+  * `return_amount_1 = 0`
+- **2.2** `leftover_1 > 0` and `min_out > 0` (swap token1→token0 is executed)
+  * `return_amount_0 = leftover_0 + out_from_swap`
+  * `return_amount_1 = 0`
+- **2.3** `leftover_1 > 0` and `min_out == 0` (no swap)
+  * **2.3.a** token1 is not wSOL: `leftover_1` is transferred to fee
+    + `return_amount_0 = leftover_0`
+    + `return_amount_1 = 0`
+  * **2.3.b** token1 is wSOL: `leftover_1` is not transferred to fee and stays with the user (later closed → SOL)
+    + `return_amount_0 = leftover_0`
+    + `return_amount_1 = leftover_1`
 
-当 `convert_to_usdc=true` ：
+Case 3: `return_mint == token1` (convert token0 leftovers into token1)
 
-* `swap_to_token_mint` 决定目标边（token0 或 token1）
-* 兑换流程为“合并 swap + 近似拆分”：
-  1. 将对侧 token 的本次增量（principal + reward）合并成一次 `swap_v2` 兑换为目标币种
-  2. 用比例近似把 swap 输出拆分为 `reward_out_est / principal_out_est`
-  3. 手续费仍然只按 reward 口径计提：`fee = (reward_direct + reward_out_est) * fee_percent`
-* `DecreaseLiquidityEvent` 在该模式下会把 principal/reward/fee **集中体现在目标币种一侧**，另一侧置 0
+- **3.1** `leftover_0 == 0`
+  * `return_amount_1 = leftover_1`
+  * `return_amount_0 = 0`
+- **3.2** `leftover_0 > 0` and `min_out > 0` (swap token0→token1 is executed)
+  * `return_amount_1 = leftover_1 + out_from_swap`
+  * `return_amount_0 = 0`
+- **3.3** `leftover_0 > 0` and `min_out == 0` (no swap)
+  * **3.3.a** token0 is not wSOL: `leftover_0` is transferred to fee
+    + `return_amount_1 = leftover_1`
+    + `return_amount_0 = 0`
+  * **3.3.b** token0 is wSOL: `leftover_0` is not transferred to fee and stays with the user (later closed → SOL)
+    + `return_amount_1 = leftover_1`
+    + `return_amount_0 = leftover_0`
 
-当 `convert_to_usdc=false` ：
+Additional notes (wSOL & rent):
 
-* 不换币，对 token0/token1 各自 reward 分别抽成并分别 transfer 到 fee_token0/fee_token1 ATA
+- `close_account` transfers away all lamports of the token account, so **the rent is transferred along with it**.
+- The `return_amount_*` fields in the event record the token `amount` only (excluding rent); the SOL actually received by the wallet will be slightly more than that figure (it includes the rent).
 
----
+### 4.4 remainingAccounts Rules
 
-## 6. 事件（可观测性）
+`ctx.remaining_accounts` in `swap_and_deposit` is **used only for Raydium `swap_v2`**:
 
-事件定义见 `programs/lp_handler/src/state/events.rs` ：
+- Structure: `[bitmap_extension?] + [swap_tick_array_0..N]`
+- Tick arrays needed by open_position must not be mixed into remaining (lower/upper are already passed as fixed accounts)
 
-* `IncreaseLiquidityEvent`：加仓 amount0/amount1、tick 区间、position nft mint 等
-  + `return_amount_0/return_amount_1`：两侧最终退回给用户的剩余（最小单位；wSOL 会在函数末尾 close/unwrap 成 SOL，实际到账会额外包含 rent）
-* `DecreaseLiquidityEvent`：principal、reward、integrator_fee（按“兑换后口径”或“双币口径”输出）
+The contract performs lightweight validation on remaining:
 
----
+- Count `<= 32`
+- Each account's `owner` must equal `raydium_clmm_program`
 
-## 7. 错误码与常见排查
+### 4.5 Reference Test Cases (Calling Convention)
 
-错误码见 `programs/lp_handler/src/state/errors.rs` ：
+Reference: `tests/lp_deposit.test.ts`
 
-* `InvalidRemainingAccounts`
-  + swap_and_deposit：remaining 超过 32 或 owner 不正确
-  + decrease_liquidity：找不到分隔符或 swap_remaining 校验失败
-* `InvalidPositionNftAccount`：Position NFT ATA 地址推导不匹配
-* `InvalidDepositMint`：`return_mint`（若提供）/ `swap_to_token_mint` 不是池子 token0/token1
-  + swap_and_deposit：`return_mint` 不合法（不是池子 token0/token1）时也会触发
-* `InvalidFeeOwner`/`InvalidFeeTokenAccount`：fee 白名单或 fee ATA 校验失败
-* `InvalidTickRange`：tick 区间非法
-* `InvalidSlippage`/`InvalidFeePercent`：参数越界
-* `NoBalanceChange`：decrease 后两边增量都为 0（无可领/无可退）
-* `MathOverflow`/`InvalidSqrtPrice`：运算或价格输入异常
-
-排查建议：
-
-* 首先确认 remainingAccounts 的组织规则（尤其 `decrease_liquidity` 的分隔符）
-* 其次确认 fee_owner 与 fee ATA（mint/owner/推导 token program）是否正确
-* 再看 Raydium CPI 的 log（tick arrays/bitmap 是否匹配当前 pool）
-
----
-
-## 8. 信任边界与安全注意事项
-
-### CPI 边界
-
-合约强依赖 `raydium_amm_v3` 的账户校验与执行语义。本合约主要保证“上层协议与业务约束”：
-
-* pool/vault/amm_config 的关联一致性
-* Position NFT ATA 地址推导一致性
-* remainingAccounts 的基础约束（数量与 owner）以及 decrease 的分隔符协议
-* fee 白名单与 fee 收款账户强约束（避免“把 fee 转回自己绕过抽成”）
-
-### remainingAccounts 风险面
-
-* swap_v2 的 tick arrays/bitmap 由调用方提供：合约只做轻量 owner/数量校验，不解析其是否属于当前 pool；错误数据通常会在 Raydium CPI 失败。
-* decrease_liquidity 的分隔符协议是逻辑正确性的关键：混放/缺失会直接失败或造成行为不符合预期。
-
-### 滑点与价格读数
-
-目前 `calc_min_amount_out` 使用 `sqrt_price_x64` 进行“基于现价的近似阈值”计算；如果价格剧烈波动或 tick 穿越较多，仍可能导致：
-
-* 保护不够严（min_out 过低）
-* 或过严导致失败（如果估算偏差）
-
-为提升严谨性，已实现的做法是：**每次 CPI 调用 `swap_v2` 前重新读取 `pool_state.sqrt_price_x64` 再计算 `min_out` **（在 `decrease_liquidity` 的 reward swap 与 principal swap 前分别读取一次）。 
-
-### reward-only 抽成的正确性假设
-
-* principal 估算依赖当前 tick 与 sqrt_price 的一致性；极端情况下可能出现 `delta < principal_expected`，当前实现 `saturating_sub` 使 reward=0，避免抽到本金，但会影响 reward 统计口径。
+- Use the Raydium SDK to compute the tick arrays required for the swap and push them into `remainingAccounts` in order
+- `positionNftMint` is generated with `Keypair.generate()` and used as a signer
+- `positionNftAccount` uses Token2022 ATA derivation (`getATAAddress(user, mint, TOKEN_2022_PROGRAM_ID)`)
+- The transaction layer usually raises the compute limit/price
 
 ---
 
-## 9. 与测试用例的对应关系
+## 5. Instruction 2: `decrease_liquidity`
 
-* `tests/lp_deposit.test.ts`：存入（swap + open_position）与 swap remainingAccounts 构造示例
-* `tests/lp_withdraw.test.ts`：减仓（含兑换 + close position）与 remainingAccounts 三段式组织示例
-* `tests/lp_claim.test.ts`：领奖（`liquidity=0`）与 remainingAccounts 三段式组织示例
+### 5.1 Entry Point and Parameters
+
+Entry point: `programs/lp_handler/src/lib.rs` -> `instructions::decrease_liquidity`
+
+Parameter semantics:
+
+- `liquidity: u128`
+  * `>0`: typical withdraw (principal + rewards)
+  * `=0`: typical claim (rewards only; principal is treated as 0)
+- `mint_amount_0` / `mint_amount_1: u64`: parameters passed through to Raydium `decrease_liquidity_v2` (usually 0 in the tests)
+- `swap_to_token_mint: Pubkey`: the target mint (only effective when `convert_to_usdc=true`); must be the pool's token0 or token1
+- `slippage_bps: u16`: `<= 5000`
+- `fee_percent: u16`: fee rate (bps), `<= 10000`
+- `convert_to_usdc: bool`: the implementation semantics are "convert to the target token" (the name is business-oriented)
+
+### 5.2 Account Model and Key Constraints
+
+Accounts: `DecreaseLiquidity<'info>`
+
+Key constraints:
+
+- `fee_owner` must be present in the `fee_owners` whitelist in the `security_config` PDA (validated at runtime)
+- `fee_token0_account` / `fee_token1_account` must be the **ATA** of the corresponding mint for fee_owner
+  * `mint` and `owner` are both validated
+  * During ATA derivation, the token_program used is the `owner` of the vault mint account (compatible with SPL Token / Token2022)
+
+### 5.3 remainingAccounts Separator Protocol (Critical)
+
+`decrease_liquidity` has to serve remaining accounts for two kinds of CPI at once:
+
+- tick arrays / bitmap for swap_v2
+- reward-related remaining accounts for decrease_liquidity_v2
+
+The contract uses the **`lp_handler programId` as the separator**:
+
+- Find the first position in `ctx.remaining_accounts` where `pubkey == crate::ID`
+- Before the separator: `swap_remaining`
+- After the separator (skipping the separator itself): `decrease_remaining`
+
+A missing separator raises `InvalidRemainingAccounts` directly.
+
+The order in which the reference tests (`tests/lp_withdraw.test.ts` / `tests/lp_claim.test.ts`) build remainingAccounts:
+
+1. push swap_remaining (bitmap_extension? + tick arrays)
+2. push the separator: `{ pubkey: program.programId, ... }`
+3. push decrease_remaining (may include bitmap_extension plus a triplet per reward: poolRewardVault, ownerRewardVault, rewardMint)
+
+### 5.4 principal vs reward and the Fee Model (Critical)
+
+The key design point of this instruction: **the fee is charged on the reward (trading fees / rewards) only, never on the principal**.
+
+Implementation:
+
+- First CPI into Raydium `decrease_liquidity_v2`
+- Obtain `delta0` / `delta1` from the **balance increase** of the user's token0/token1 ATAs
+- Compute the principal:
+  * `liquidity == 0`: principal is treated as 0 (claim semantics)
+  * `liquidity > 0`: estimate `principal_expected_0/1` from the current price and the range
+- `reward_gross = delta - principal_expected` (using `saturating_sub` to avoid negative values)
+- Fee: `integrator_fee = reward_gross * fee_percent / 10000`
+
+### 5.5 Conversion Path convert_to_usdc=true (Implementation Semantics: Convert to Target Token)
+
+When `convert_to_usdc=true`:
+
+- `swap_to_token_mint` determines the target side (token0 or token1)
+- The conversion flow is "merged swap + approximate split":
+  1. Merge this call's increase on the opposite side (principal + reward) into a single `swap_v2` conversion into the target token
+  2. Split the swap output into `reward_out_est` / `principal_out_est` by approximate proportion
+  3. The fee is still accrued on the reward portion only: `fee = (reward_direct + reward_out_est) * fee_percent`
+- In this mode, `DecreaseLiquidityEvent` reports principal/reward/fee **consolidated on the target token side**, with the other side set to 0
+
+When `convert_to_usdc=false`:
+
+- No conversion takes place; the fee is charged separately on the token0 and token1 rewards and transferred separately to the fee_token0 / fee_token1 ATAs
 
 ---
 
-## 10.  交易示例
+## 6. Events (Observability)
 
-* withdraw : https://solscan.io/tx/4FP1XmPP16xFEUfnwhebY1GEskSzDbyQxNBCycpmUt6zPS1UVmdzkqB3P8J5C6BpgiXfYh2xz8KDSEG5AEdDcFRf
-* deposit: https://solscan.io/tx/Tr5YioQQ5erjrvGBM87zmx5pmf6md3D8hiGdGcDXbPZye6rvSe891rBFJS38tCg3LGstgAtrWcF9dadiKDzrBys
-* claim:  https://solscan.io/tx/4V91uuLWYLwho7M6a9qh6CBUDNUJaxCUyTG1mCLfV8MjU57QoeYSwVZEccQe4rgtgPbAgWwAMtfHKGoesmzn4Gc
+Event definitions are in `programs/lp_handler/src/state/events.rs`:
 
- 
+- `IncreaseLiquidityEvent`: added amount0/amount1, tick range, position NFT mint, etc.
+  * `return_amount_0` / `return_amount_1`: the leftovers ultimately returned to the user on each side (smallest unit; wSOL is closed/unwrapped into SOL at the end of the function, so the amount actually received additionally includes the rent)
+- `DecreaseLiquidityEvent`: principal, reward, integrator_fee (reported either "post-conversion" or "per-token")
+
+---
+
+## 7. Error Codes and Common Troubleshooting
+
+Error codes are in `programs/lp_handler/src/state/errors.rs`:
+
+- `InvalidRemainingAccounts`
+  * swap_and_deposit: remaining exceeds 32, or an owner is incorrect
+  * decrease_liquidity: the separator cannot be found, or swap_remaining validation fails
+- `InvalidPositionNftAccount`: the Position NFT ATA address derivation does not match
+- `InvalidDepositMint`: `return_mint` (if provided) / `swap_to_token_mint` is not the pool's token0/token1
+  * swap_and_deposit: also raised when `return_mint` is invalid (not the pool's token0/token1)
+- `InvalidFeeOwner` / `InvalidFeeTokenAccount`: fee whitelist or fee ATA validation failed
+- `InvalidTickRange`: illegal tick range
+- `InvalidSlippage` / `InvalidFeePercent`: parameters out of bounds
+- `NoBalanceChange`: after the decrease, both sides show zero increase (nothing to claim / nothing to withdraw)
+- `MathOverflow` / `InvalidSqrtPrice`: arithmetic or price input anomaly
+
+Troubleshooting suggestions:
+
+- First confirm how remainingAccounts is organized (especially the separator for `decrease_liquidity`)
+- Next confirm that fee_owner and the fee ATAs are correct (mint / owner / the token program used for derivation)
+- Then check the Raydium CPI logs (whether the tick arrays / bitmap match the current pool)
+
+---
+
+## 8. Trust Boundaries and Security Considerations
+
+### CPI Boundary
+
+The contract depends heavily on the account validation and execution semantics of `raydium_amm_v3`. This contract mainly guarantees the "upper-layer protocol and business constraints":
+
+- Consistency of the pool / vault / amm_config associations
+- Consistency of Position NFT ATA address derivation
+- Basic constraints on remainingAccounts (count and owner) plus the separator protocol for decrease
+- Strong constraints on the fee whitelist and fee recipient accounts (preventing "transferring the fee back to oneself to bypass the charge")
+
+### remainingAccounts Risk Surface
+
+- The tick arrays / bitmap for swap_v2 are supplied by the caller: the contract only performs lightweight owner/count validation and does not parse whether they belong to the current pool; bad data will normally fail inside the Raydium CPI.
+- The separator protocol in decrease_liquidity is critical to logical correctness: mixing them up or omitting the separator will fail outright or produce unexpected behavior.
+
+### Slippage and Price Readings
+
+At present `calc_min_amount_out` uses `sqrt_price_x64` to compute an "approximate threshold based on the current price". If the price moves violently or many ticks are crossed, this can still result in:
+
+- Insufficient protection (min_out too low)
+- Or over-strict protection causing failure (if the estimate is off)
+
+To make this more rigorous, the implemented approach is: **re-read `pool_state.sqrt_price_x64` before every `swap_v2` CPI and then compute `min_out`** (read once before the reward swap and once before the principal swap in `decrease_liquidity`).
+
+### Correctness Assumptions of reward-only Fee Charging
+
+- The principal estimate relies on consistency between the current tick and sqrt_price; in extreme cases `delta < principal_expected` may occur. The current implementation uses `saturating_sub` so that reward = 0, which avoids charging a fee on the principal but does affect reward accounting.
+
+---
+
+## 9. Mapping to Test Cases
+
+- `tests/lp_deposit.test.ts`: deposit (swap + open_position) and an example of building swap remainingAccounts
+- `tests/lp_withdraw.test.ts`: decrease liquidity (including conversion + close position) and an example of the three-part remainingAccounts layout
+- `tests/lp_claim.test.ts`: claim (`liquidity=0`) and an example of the three-part remainingAccounts layout
+
+---
+
+## 10. Example Transactions
+
+- withdraw: <https://solscan.io/tx/4FP1XmPP16xFEUfnwhebY1GEskSzDbyQxNBCycpmUt6zPS1UVmdzkqB3P8J5C6BpgiXfYh2xz8KDSEG5AEdDcFRf>
+- deposit: <https://solscan.io/tx/Tr5YioQQ5erjrvGBM87zmx5pmf6md3D8hiGdGcDXbPZye6rvSe891rBFJS38tCg3LGstgAtrWcF9dadiKDzrBys>
+- claim: <https://solscan.io/tx/4V91uuLWYLwho7M6a9qh6CBUDNUJaxCUyTG1mCLfV8MjU57QoeYSwVZEccQe4rgtgPbAgWwAMtfHKGoesmzn4Gc>

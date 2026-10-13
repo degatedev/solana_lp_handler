@@ -25,11 +25,11 @@ import {
 } from '@raydium-io/raydium-sdk-v2';
 import { ASSOCIATED_TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import { solveZapTwoSidedCLMM } from './utils';
+import { loadPosition, openPositionForTest } from './fixtures';
 import {
   connection,
   deposit_amount,
   deposit_token_mint,
-  endPrice,
   fee_address,
   getPoolInfo,
   getPoolKeys,
@@ -41,7 +41,7 @@ import {
   program,
   securityConfig,
   slippage,
-  startPrice,
+  submitTransaction,
   user,
   userWallet
 } from './help';
@@ -60,15 +60,18 @@ describe('lp_increase_liquidity', () => {
   let poolKeys: ClmmKeys;
   let raydium: Raydium;
 
+  let positionNftMint: PublicKey;
+
   beforeAll(async () => {
     raydium = await getRaydium();
     poolKeys = await getPoolKeys();
-  }, 50000);
+    // 现开一个仓供加仓用例使用（模拟链上无法按 owner 枚举已有 position）
+    positionNftMint = await openPositionForTest();
+  }, 500000);
 
   async function simulateIncreaseLiquidity(overrides?: { quotedMode?: number; quotedSqrtPriceX64?: anchor.BN }) {
     const poolProgramId = new PublicKey(poolKeys.programId);
-    const allPosition = await raydium.clmm.getOwnerPositionInfo({ programId: CLMM_PROGRAM_ID });
-    const position = allPosition.shift();
+    const position = await loadPosition(positionNftMint);
     const tickLower = position.tickLower;
     const tickUpper = position.tickUpper;
     const protocolPosition = getPdaProtocolPositionAddress(poolProgramId, pool_address, tickLower, tickUpper).publicKey;
@@ -208,6 +211,9 @@ describe('lp_increase_liquidity', () => {
         observationState: new PublicKey(poolKeys.observationId),
         signerToken0Account: userToken0Account.tokenAccount,
         signerToken1Account: userToken1Account.tokenAccount,
+        recipient: user,
+        refundToken0Account: userToken0Account.tokenAccount,
+        refundToken1Account: userToken1Account.tokenAccount,
         positionNftAccount: positionNftAccount.publicKey,
         protocolPosition,
         tickArrayLower,
@@ -252,11 +258,7 @@ describe('lp_increase_liquidity', () => {
         ]
       }).compileToV0Message(addressLookupTableAccounts)
     );
-    const transactionResult = await connection.simulateTransaction(transaction, {
-      sigVerify: false,
-      replaceRecentBlockhash: true,
-      innerInstructions: true
-    });
+    const transactionResult = await submitTransaction(transaction);
 
     return {
       transactionResult,

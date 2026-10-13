@@ -9,6 +9,25 @@ use raydium_amm_v3::libraries::{liquidity_math, U256};
 
 use crate::LpDepositError;
 
+/// 校验两个 refund token account 的 owner 必须是 signer 或 recipient。
+/// 支持硬件钱包场景下 signer ≠ recipient 时，前端按需选择传入任一方的 ATA。
+pub fn validate_refund_authorities(
+    signer: Pubkey,
+    recipient: Pubkey,
+    refund0_owner: Pubkey,
+    refund1_owner: Pubkey,
+) -> Result<()> {
+    require!(
+        refund0_owner == signer || refund0_owner == recipient,
+        LpDepositError::InvalidRefundAuthority
+    );
+    require!(
+        refund1_owner == signer || refund1_owner == recipient,
+        LpDepositError::InvalidRefundAuthority
+    );
+    Ok(())
+}
+
 fn calculate_transfer_fee_from_config(
     transfer_fee_config: &TransferFeeConfig,
     epoch: u64,

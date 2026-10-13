@@ -12,7 +12,7 @@ use state::*;
 
 // ProgramId 需要与部署的 program keypair 对应的地址一致。
 // 本分支统一使用生产环境（mainnet）的 ProgramId。
-declare_id!("J4Azw2wMzemVRtEvCFAUF6dHxFEwZbLzNZrHjXSpRfb3");
+declare_id!("DE4a5y8j57asmWfKPBqzPAsiQimPADSYuZSzTSLJ1ohX");
 
 #[program]
 #[allow(deprecated)]
@@ -32,10 +32,12 @@ pub mod lp_handler {
             recipient = $recipient:expr,
             fee_owner = $fee_owner:expr,
             pool_state = $pool:expr,
+            allowed_close = $allowed_close:expr,
             body = $body:expr
         ) => {{
             let accounts = $ctx.accounts.to_account_infos();
             let policy = sec::resolve_policy(&accounts)?;
+            let allowed_close_keys: Vec<Pubkey> = $allowed_close;
             let snapshot = sec::entry_check_and_snapshot(
                 &accounts,
                 $ctx.remaining_accounts,
@@ -44,10 +46,29 @@ pub mod lp_handler {
                 $recipient,
                 $fee_owner,
                 &policy,
+                &allowed_close_keys,
             )?;
             let res = $body;
             sec::exit_check(&accounts, $signer, $recipient, &policy, snapshot)?;
             res
+        }};
+        (
+            $ctx:expr,
+            signer = $signer:expr,
+            recipient = $recipient:expr,
+            fee_owner = $fee_owner:expr,
+            pool_state = $pool:expr,
+            body = $body:expr
+        ) => {{
+            secure_entrypoint!(
+                $ctx,
+                signer = $signer,
+                recipient = $recipient,
+                fee_owner = $fee_owner,
+                pool_state = $pool,
+                allowed_close = Vec::<Pubkey>::new(),
+                body = $body
+            )
         }};
     }
 
@@ -110,12 +131,16 @@ pub mod lp_handler {
         let signer = ctx.accounts.signer.key();
         let recipient = ctx.accounts.recipient.key();
         let fee_owner = ctx.accounts.fee_owner.key();
+        // 全量减仓时本指令会在末尾 CPI Raydium close_position，关闭 position NFT token account；
+        // 因此显式声明该账户在出口对账时允许处于 closed 状态。
+        let allowed_close = vec![ctx.accounts.position_nft_account.key()];
         secure_entrypoint!(
             ctx,
             signer = signer,
             recipient = recipient,
             fee_owner = fee_owner,
             pool_state = &ctx.accounts.pool_state,
+            allowed_close = allowed_close,
             body = instructions::decrease_liquidity(
                 ctx,
                 liquidity,
@@ -145,11 +170,12 @@ pub mod lp_handler {
         swap_input_is_token0: bool,
     ) -> Result<()> {
         let signer = ctx.accounts.signer.key();
+        let recipient = ctx.accounts.recipient.key();
         let fee_owner = ctx.accounts.fee_owner.key();
         secure_entrypoint!(
             ctx,
             signer = signer,
-            recipient = signer,
+            recipient = recipient,
             fee_owner = fee_owner,
             pool_state = &ctx.accounts.pool_state,
             body = instructions::increase_liquidity(
@@ -191,5 +217,63 @@ pub mod lp_handler {
     /// 关闭 security_config PDA 并回收租金到 receiver。
     pub fn close_security_config(ctx: Context<CloseSecurityConfig>) -> Result<()> {
         instructions::close_security_config(ctx)
+    }
+
+    /// 双币直接开仓，不执行任何 swap，剩余双币原样退回。
+    pub fn open_position_without_swap<'a, 'b, 'c: 'info, 'info>(
+        ctx: Context<'a, 'b, 'c, 'info, OpenPositionWithoutSwap<'info>>,
+        amount_0_in: u64,
+        amount_1_in: u64,
+        tick_lower_index: i32,
+        tick_upper_index: i32,
+        liquidity: u128,
+        slippage_bps: u16,
+    ) -> Result<()> {
+        let signer = ctx.accounts.signer.key();
+        let recipient = ctx.accounts.recipient.key();
+        let fee_owner = ctx.accounts.fee_owner.key();
+        secure_entrypoint!(
+            ctx,
+            signer = signer,
+            recipient = recipient,
+            fee_owner = fee_owner,
+            pool_state = &ctx.accounts.pool_state,
+            body = instructions::open_position_without_swap(
+                ctx,
+                amount_0_in,
+                amount_1_in,
+                tick_lower_index,
+                tick_upper_index,
+                liquidity,
+                slippage_bps,
+            )
+        )
+    }
+
+    /// 双币直接追加流动性，不执行任何 swap，剩余双币原样退回。
+    pub fn increase_liquidity_without_swap<'a, 'b, 'c: 'info, 'info>(
+        ctx: Context<'a, 'b, 'c, 'info, IncreaseLiquidityWithoutSwap<'info>>,
+        amount_0_in: u64,
+        amount_1_in: u64,
+        liquidity: u128,
+        slippage_bps: u16,
+    ) -> Result<()> {
+        let signer = ctx.accounts.signer.key();
+        let recipient = ctx.accounts.recipient.key();
+        let fee_owner = ctx.accounts.fee_owner.key();
+        secure_entrypoint!(
+            ctx,
+            signer = signer,
+            recipient = recipient,
+            fee_owner = fee_owner,
+            pool_state = &ctx.accounts.pool_state,
+            body = instructions::increase_liquidity_without_swap(
+                ctx,
+                amount_0_in,
+                amount_1_in,
+                liquidity,
+                slippage_bps,
+            )
+        )
     }
 }

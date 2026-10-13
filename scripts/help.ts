@@ -4,7 +4,6 @@ import os from 'os';
 import path from 'path';
 import * as anchor from '@coral-xyz/anchor';
 import { Program } from '@coral-xyz/anchor';
-import { LpHandler } from '../target/types/lp_handler';
 import { spawnSync, SpawnSyncOptions, SpawnSyncReturns } from 'child_process';
 import { prompt } from 'enquirer';
 
@@ -17,10 +16,6 @@ if (walletPath && walletPath.startsWith('~/')) {
 }
 
 anchor.setProvider(anchor.AnchorProvider.env());
-
-export const program = anchor.workspace.lpHandler as Program<LpHandler>;
-
-export const securityConfig = PublicKey.findProgramAddressSync([Buffer.from('security_config')], program.programId)[0];
 
 export const userWallet = anchor.AnchorProvider.env().wallet;
 

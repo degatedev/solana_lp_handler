@@ -167,6 +167,13 @@ pub struct DecreaseLiquidity<'info> {
     )]
     pub position_nft_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
+    /// position NFT mint：全量减仓后 CPI close_position 时 burn NFT 并关闭 mint（Token2022）。
+    #[account(
+        mut,
+        address = personal_position.nft_mint,
+    )]
+    pub position_nft_mint: Box<InterfaceAccount<'info, Mint>>,
+
     /// CHECK: `protocol_position` 已废弃，仅为兼容保留
     pub protocol_position: UncheckedAccount<'info>,
 
@@ -259,6 +266,9 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
     // - claim: liquidity=0 => principal=0 => 全部增量都视为奖励/手续费
     // - withdraw: liquidity>0 => principal>0 => 奖励/手续费 = 增量 - principal
     // -----------------------------
+    // 在 CPI 之前捕获 position 当前 liquidity，用于判断是否“全量减仓 → 关闭仓位”。
+    let position_liquidity_before = ctx.accounts.personal_position.liquidity;
+
     let (principal_expected_0, principal_expected_1) = if liquidity == 0 {
         (0u64, 0u64)
     } else {
@@ -267,17 +277,22 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             (pool_state.tick_current, pool_state.sqrt_price_x64)
         };
 
-        let (principal_expected_0, principal_expected_1) = utils::calculate_principal_amounts_for_liquidity(
-            tick_current_before,
-            sqrt_price_x64_before,
-            ctx.accounts.personal_position.tick_lower_index,
-            ctx.accounts.personal_position.tick_upper_index,
-            liquidity,
+        let (principal_expected_0, principal_expected_1) =
+            utils::calculate_principal_amounts_for_liquidity(
+                tick_current_before,
+                sqrt_price_x64_before,
+                ctx.accounts.personal_position.tick_lower_index,
+                ctx.accounts.personal_position.tick_upper_index,
+                liquidity,
+            )?;
+        let principal_transfer_fee_0 = utils::get_transfer_fee_for_amount(
+            ctx.accounts.vault_0_mint.as_ref(),
+            principal_expected_0,
         )?;
-        let principal_transfer_fee_0 =
-            utils::get_transfer_fee_for_amount(ctx.accounts.vault_0_mint.as_ref(), principal_expected_0)?;
-        let principal_transfer_fee_1 =
-            utils::get_transfer_fee_for_amount(ctx.accounts.vault_1_mint.as_ref(), principal_expected_1)?;
+        let principal_transfer_fee_1 = utils::get_transfer_fee_for_amount(
+            ctx.accounts.vault_1_mint.as_ref(),
+            principal_expected_1,
+        )?;
         (
             principal_expected_0
                 .checked_sub(principal_transfer_fee_0)
@@ -420,10 +435,7 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
                 total_other_in
             };
 
-            if should_skip_claim_only_dust_swap(
-                principal_other_in,
-                usdc_denominated_amount,
-            ) {
+            if should_skip_claim_only_dust_swap(principal_other_in, usdc_denominated_amount) {
                 msg!(
                     "skip reward swap (claim-only dust): below MIN_USDC_SWAP_AMOUNT, transfer full reward input to fee"
                 );
@@ -747,18 +759,20 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
     let is_wsol_1 = crate::consts::is_native_sol_mint(&ctx.accounts.vault_1_mint.key());
 
     // token0 结算
-    if net0 > 0 {
-        if is_wsol_0 {
-            require_log!(net0 >= fee_due_0, LpDepositError::MathOverflow);
+    if is_wsol_0 {
+        // unwrap：close wSOL token account，把 lamports 退回 signer。
+        // 无论 net0 是否为 0 都要 close：net0 == 0 表示 wSOL 只作为中转（例如全额换成另一侧 mint），
+        // 此时账户已空且不会再被使用，跳过 close 会让空账户滞留并占用租金。
+        zap_common::unwrap_wsol_to_destination(
+            ctx.accounts.signer.to_account_info(),
+            ctx.accounts.signer_token0_account.to_account_info(),
+            ctx.accounts.signer.to_account_info(),
+            ctx.accounts.token_program.to_account_info(),
+            Some(ctx.accounts.token_program_2022.to_account_info()),
+        )?;
 
-            // unwrap：close wSOL token account，把 lamports 退回 signer
-            zap_common::unwrap_wsol_to_destination(
-                ctx.accounts.signer.to_account_info(),
-                ctx.accounts.signer_token0_account.to_account_info(),
-                ctx.accounts.signer.to_account_info(),
-                ctx.accounts.token_program.to_account_info(),
-                Some(ctx.accounts.token_program_2022.to_account_info()),
-            )?;
+        if net0 > 0 {
+            require_log!(net0 >= fee_due_0, LpDepositError::MathOverflow);
 
             // fee：以 SOL(lamports) 支付给 fee_owner
             if fee_due_0 > 0 {
@@ -790,32 +804,33 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
                     rem,
                 )?;
             }
-        } else if !recipient_is_signer {
-            zap_common::transfer_token_to_fee_accounts(
-                ctx.accounts.signer.to_account_info(),
-                ctx.accounts.signer_token0_account.to_account_info(),
-                ctx.accounts.recipient_token0_account.to_account_info(),
-                ctx.accounts.vault_0_mint.to_account_info(),
-                ctx.accounts.vault_0_mint.decimals,
-                ctx.accounts.token_program.to_account_info(),
-                Some(ctx.accounts.token_program_2022.to_account_info()),
-                net0,
-            )?;
         }
+    } else if net0 > 0 && !recipient_is_signer {
+        zap_common::transfer_token_to_fee_accounts(
+            ctx.accounts.signer.to_account_info(),
+            ctx.accounts.signer_token0_account.to_account_info(),
+            ctx.accounts.recipient_token0_account.to_account_info(),
+            ctx.accounts.vault_0_mint.to_account_info(),
+            ctx.accounts.vault_0_mint.decimals,
+            ctx.accounts.token_program.to_account_info(),
+            Some(ctx.accounts.token_program_2022.to_account_info()),
+            net0,
+        )?;
     }
 
     // token1 结算
-    if net1 > 0 {
-        if is_wsol_1 {
-            require_log!(net1 >= fee_due_1, LpDepositError::MathOverflow);
+    if is_wsol_1 {
+        // 同 token0：无条件 close，避免空的 wSOL 中转账户滞留占用租金。
+        zap_common::unwrap_wsol_to_destination(
+            ctx.accounts.signer.to_account_info(),
+            ctx.accounts.signer_token1_account.to_account_info(),
+            ctx.accounts.signer.to_account_info(),
+            ctx.accounts.token_program.to_account_info(),
+            Some(ctx.accounts.token_program_2022.to_account_info()),
+        )?;
 
-            zap_common::unwrap_wsol_to_destination(
-                ctx.accounts.signer.to_account_info(),
-                ctx.accounts.signer_token1_account.to_account_info(),
-                ctx.accounts.signer.to_account_info(),
-                ctx.accounts.token_program.to_account_info(),
-                Some(ctx.accounts.token_program_2022.to_account_info()),
-            )?;
+        if net1 > 0 {
+            require_log!(net1 >= fee_due_1, LpDepositError::MathOverflow);
 
             if fee_due_1 > 0 {
                 anchor_lang::system_program::transfer(
@@ -845,21 +860,67 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
                     rem,
                 )?;
             }
-        } else if !recipient_is_signer {
-            zap_common::transfer_token_to_fee_accounts(
-                ctx.accounts.signer.to_account_info(),
-                ctx.accounts.signer_token1_account.to_account_info(),
-                ctx.accounts.recipient_token1_account.to_account_info(),
-                ctx.accounts.vault_1_mint.to_account_info(),
-                ctx.accounts.vault_1_mint.decimals,
-                ctx.accounts.token_program.to_account_info(),
-                Some(ctx.accounts.token_program_2022.to_account_info()),
-                net1,
-            )?;
+        }
+    } else if net1 > 0 && !recipient_is_signer {
+        zap_common::transfer_token_to_fee_accounts(
+            ctx.accounts.signer.to_account_info(),
+            ctx.accounts.signer_token1_account.to_account_info(),
+            ctx.accounts.recipient_token1_account.to_account_info(),
+            ctx.accounts.vault_1_mint.to_account_info(),
+            ctx.accounts.vault_1_mint.decimals,
+            ctx.accounts.token_program.to_account_info(),
+            Some(ctx.accounts.token_program_2022.to_account_info()),
+            net1,
+        )?;
+    }
+
+    // 全量减仓（liquidity > 0 且 == 入口快照 liquidity）：关闭 position（burn NFT + close personal_position
+    // + close NFT mint(Token2022)）。Raydium close_position 要求 liquidity/fees_owed/reward_amount_owed 全为 0。
+    // 若 recipient != signer，把 close 回收到 signer 的全部租金转给 recipient。
+    // 非全量场景（claim / 部分减仓）不在合约内转移 NFT；NFT 仍由 signer 持有。
+    if liquidity > 0 && liquidity == position_liquidity_before {
+        let signer_lamports_before_close = ctx.accounts.signer.lamports();
+        cpi_close_position(&ctx)?;
+        if !recipient_is_signer {
+            let signer_lamports_after_close = ctx.accounts.signer.lamports();
+            let rent_recovered = signer_lamports_after_close
+                .checked_sub(signer_lamports_before_close)
+                .ok_or(LpDepositError::MathOverflow)?;
+            if rent_recovered > 0 {
+                anchor_lang::system_program::transfer(
+                    CpiContext::new(
+                        ctx.accounts.system_program.to_account_info(),
+                        anchor_lang::system_program::Transfer {
+                            from: ctx.accounts.signer.to_account_info(),
+                            to: ctx.accounts.recipient.to_account_info(),
+                        },
+                    ),
+                    rent_recovered,
+                )?;
+            }
         }
     }
 
     Ok(())
+}
+
+#[inline(never)]
+fn cpi_close_position<'a, 'b, 'c: 'info, 'info>(
+    ctx: &Context<'a, 'b, 'c, 'info, DecreaseLiquidity<'info>>,
+) -> Result<()> {
+    let accounts = &ctx.accounts;
+    let cpi_program = accounts.raydium_clmm_program.to_account_info();
+    let cpi_accounts = clmm_accounts::ClosePosition {
+        nft_owner: accounts.signer.to_account_info(),
+        position_nft_mint: accounts.position_nft_mint.to_account_info(),
+        position_nft_account: accounts.position_nft_account.to_account_info(),
+        personal_position: accounts.personal_position.to_account_info(),
+        system_program: accounts.system_program.to_account_info(),
+        // Position NFT 使用 Token2022（CLMM 约定），TokenInterface 接收 Token2022 program。
+        token_program: accounts.token_program_2022.to_account_info(),
+    };
+    let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
+    clmm_cpi::close_position(cpi_ctx)
 }
 
 /// 重要：把 Raydium CPI 的 accounts struct 构造移出主 handler，避免 BPF 4KB 栈帧超限。
@@ -989,10 +1050,7 @@ fn calc_dust_transfer_amount(reward_amount: u64) -> u64 {
 /// L2 修复：始终用 USDC 计价的金额与 MIN_USDC_SWAP_AMOUNT 比较。
 /// - target 是 USDC 时，swap 输出（threshold）是 USDC 计价 → 用 threshold
 /// - target 不是 USDC 时，swap 输入（total_other_in）就是 USDC → 用 total_other_in
-fn should_skip_claim_only_dust_swap(
-    principal_other_in: u64,
-    usdc_denominated_amount: u64,
-) -> bool {
+fn should_skip_claim_only_dust_swap(principal_other_in: u64, usdc_denominated_amount: u64) -> bool {
     principal_other_in == 0 && usdc_denominated_amount < crate::consts::MIN_USDC_SWAP_AMOUNT
 }
 

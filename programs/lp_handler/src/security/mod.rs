@@ -80,6 +80,10 @@ pub struct SecuritySnapshot<'info> {
     pub uninitialized_indices: Vec<(usize, Pubkey)>,
     /// 入口时 program-owned 账户的 lamports，用于 H01 的相对校验。
     pub program_owned_lamports: Vec<(Pubkey, u64)>,
+    /// 调用方明确声明：本次指令允许在结束时被 close 的 signer-authority token account（key 列表）。
+    /// 出口对账时，这些 key 即使已 close（变为未初始化）也不会触发 SecurityTokenAccountCorrupted。
+    /// 典型场景：decrease_liquidity 全量减仓后关闭 position NFT token account。
+    pub allowed_close_account_keys: Vec<Pubkey>,
 }
 
 fn is_uninitialized_account(ai: &AccountInfo) -> bool {
@@ -282,6 +286,7 @@ pub fn entry_check_and_snapshot<'info>(
     recipient: Pubkey,
     fee_owner: Pubkey,
     policy: &SecurityPolicy,
+    allowed_close_account_keys: &[Pubkey],
 ) -> Result<SecuritySnapshot<'info>> {
     let pool_state_key = pool_state.key();
 
@@ -460,10 +465,24 @@ pub fn entry_check_and_snapshot<'info>(
             }
         }
     }
+    // 入口阶段约束：所有声明为 allowed_close 的账户必须满足：
+    // - 当前已被纳入 signer_token_accounts（即入口时确为 authority==signer 的 token account）
+    // 防止把任意账户偷塞进白名单。
+    for k in allowed_close_account_keys.iter() {
+        let in_signer_set = signer_token_accounts.iter().any(|b| b.account.key() == *k);
+        require_log!(
+            in_signer_set,
+            LpDepositError::SecurityAccountSetChanged,
+            "allowed_close key not a signer-authority token account at entry: key={}",
+            k,
+        );
+    }
+
     Ok(SecuritySnapshot {
         signer_token_accounts,
         uninitialized_indices,
         program_owned_lamports,
+        allowed_close_account_keys: allowed_close_account_keys.to_vec(),
     })
 }
 
@@ -511,9 +530,17 @@ pub fn exit_check<'info>(
     for b in before.signer_token_accounts.iter() {
         let ai = &b.account;
         let cur_uninit = is_uninitialized_account(ai);
+        let is_allowed_close = before
+            .allowed_close_account_keys
+            .iter()
+            .any(|k| k == &ai.key());
         let Some(cur) = parse_token_account(ai) else {
             // 例外：允许关闭 signer 的 wSOL ATA（unwrap wSOL 场景）
             if b.is_wsol_ata && cur_uninit {
+                continue;
+            }
+            // 例外：调用方在 secure_entrypoint! 中显式声明的 allowed_close（如 position NFT）
+            if is_allowed_close && cur_uninit {
                 continue;
             }
             return err!(LpDepositError::SecurityTokenAccountCorrupted);
@@ -606,5 +633,4 @@ mod tests {
     fn program_owned_lamports_check_rejects_increase_after_entry() {
         assert!(!program_owned_lamports_ok(11, 12));
     }
-
 }

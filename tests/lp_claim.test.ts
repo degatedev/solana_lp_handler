@@ -20,6 +20,7 @@ import {
   getPdaTickArrayAddress,
   MEMO_PROGRAM_ID,
   PoolUtils,
+  PositionInfoLayout,
   Raydium,
   SYSTEM_PROGRAM_ID,
   TickUtils
@@ -27,6 +28,7 @@ import {
 import { TOKEN_PROGRAM_ID } from '@coral-xyz/anchor/dist/cjs/utils/token';
 import { ASSOCIATED_TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from '@solana/spl-token';
 import { solveZapSingleSidedCLMM } from './utils';
+import { loadPosition, openPositionForTest } from './fixtures';
 import {
   connection,
   deposit_amount,
@@ -43,6 +45,8 @@ import {
   program,
   securityConfig,
   slippage,
+  submitTransaction,
+  wsolAtaExists,
   user,
   userWallet
 } from './help';
@@ -52,23 +56,22 @@ import {
 // process.env.ANCHOR_PROVIDER_URL = "your-custom-rpc-url";
 // process.env.ANCHOR_WALLET = "your-wallet-path";
 
-const nft_mint = '';
 describe('lp_claim', () => {
   // Configure the client to use the local cluster.
 
   let poolKeys: ClmmKeys;
   let raydium: Raydium;
+  let positionNftMint: PublicKey;
 
   beforeAll(async () => {
     raydium = await getRaydium();
     poolKeys = await getPoolKeys();
-  });
+    positionNftMint = await openPositionForTest();
+  }, 500000);
   it('lp_claim test', async () => {
     const poolProgramId = new PublicKey(poolKeys.programId);
-    const allPosition = await raydium.clmm.getOwnerPositionInfo({ programId: CLMM_PROGRAM_ID });
     const poolInfo = await getPoolInfo();
-    const position = allPosition[0];
-    console.log('position', allPosition.length, position.nftMint.toBase58(), userWallet.publicKey.toBase58());
+    const position = await loadPosition(positionNftMint);
     const { tickArrayLower, tickArrayUpper } = getTickArray(
       position.tickLower,
       position.tickUpper,
@@ -207,6 +210,7 @@ describe('lp_claim', () => {
         recipientToken1Account: userToken1Account.tokenAccount,
         feeOwner: fee_address,
         positionNftAccount: positionNftAccount.publicKey,
+        positionNftMint: position.nftMint,
         protocolPosition,
         tickArrayLower,
         tickArrayUpper,
@@ -245,16 +249,20 @@ describe('lp_claim', () => {
           ComputeBudgetProgram.setComputeUnitPrice({
             microLamports: 1000
           }),
+          userToken0Account.instruction,
+          userToken1Account.instruction,
+          feeToken0Account.instruction,
+          feeToken1Account.instruction,
           ...createAccountsInstructions,
           instruction
         ]
       }).compileToV0Message(addressLookupTableAccounts)
     );
-    const transactionResult = await connection.simulateTransaction(transaction, {
-      sigVerify: false,
-      replaceRecentBlockhash: true,
-      innerInstructions: true
-    });
+    const transactionResult = await submitTransaction(transaction);
     expect(transactionResult.value.err).toBeNull();
+
+    // DG-235：目标币为 USDC 时 wSOL 只作为中转，领奖结束后该 ATA 必须被关闭，
+    // 否则会留下一个空账户长期占用用户约 0.002 SOL 租金。
+    expect(await wsolAtaExists()).toBe(false);
   }, 5000000);
 });

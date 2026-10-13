@@ -118,4 +118,10 @@ pub enum LpDepositError {
 
     #[msg("Invalid recipient: recipient pubkey is not present in instruction accounts")]
     RecipientNotInAccounts,
+
+    #[msg("Invalid refund token account authority: owner must be signer or recipient")]
+    InvalidRefundAuthority,
+
+    #[msg("Computed on-chain liquidity deviates from quoted liquidity beyond slippage tolerance")]
+    LiquiditySlippageExceeded,
 }

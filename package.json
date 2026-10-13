@@ -1,10 +1,12 @@
 {
   "license": "ISC",
   "scripts": {
+    "test": "jest",
     "lint:fix": "prettier */*.js \"*/**/*{.js,.ts}\" -w",
     "lint": "prettier */*.js \"*/**/*{.js,.ts}\" --check",
     "build": "anchor build",
-    "cli": "ts-node scripts/cli.ts"
+    "cli": "ts-node scripts/cli.ts",
+    "update-security-boundary": "ts-node scripts/update_security_boundary.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "0.31.1",

@@ -3,6 +3,8 @@ import type { JestConfigWithTsJest } from 'ts-jest';
 const config: JestConfigWithTsJest = {
   preset: 'ts-jest',
   testEnvironment: 'node',
+  // 测试在模拟链上真实落账，必须串行，否则不同套件会互相踩状态
+  maxWorkers: 1,
   moduleFileExtensions: ['ts', 'js', 'tsx', 'mjs', 'cjs', 'json'],
   testMatch: ['**/*.test.ts'],
   transform: {

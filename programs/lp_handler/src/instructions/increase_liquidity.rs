@@ -37,6 +37,10 @@ pub struct IncreaseLiquidity<'info> {
     #[account(address = raydium_amm_v3::ID)]
     pub raydium_clmm_program: Program<'info, AmmV3>,
 
+    /// CHECK: withdraw 和 claim 的接收者 必须定义到第二个账户，前端需要校验recipient 地址
+    #[account(mut)]
+    pub recipient: UncheckedAccount<'info>,
+
     /// 支付者 / 签名者
     #[account(mut)]
     pub signer: Signer<'info>,
@@ -54,6 +58,20 @@ pub struct IncreaseLiquidity<'info> {
         token::authority = signer,
     )]
     pub signer_token1_account: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    /// refund 账户的 authority 在运行时校验为 recipient 或 signer（支持硬件钱包场景）
+    #[account(
+        mut,
+        token::mint = token_vault_0.mint,
+    )]
+    pub refund_token0_account: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    /// refund 账户的 authority 在运行时校验为 recipient 或 signer（支持硬件钱包场景）
+    #[account(
+        mut,
+        token::mint = token_vault_1.mint,
+    )]
+    pub refund_token1_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
     #[account(
         constraint = position_nft_account.mint == personal_position.nft_mint,

@@ -90,4 +90,5 @@ export const initSecurityConfig = async (programId: string) => {
     })
     .rpc();
   console.log('initSecurityConfig success tx:', initIx);
+  console.log('securityConfig address:', securityConfig.toBase58());
 };

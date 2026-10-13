@@ -20,6 +20,7 @@ use crate::{utils, LpDepositError, LpHandlerIncreaseLiquidityEvent};
 pub trait ZapCommonAccounts<'info> {
     fn raydium_clmm_program(&self) -> &Program<'info, AmmV3>;
     fn signer(&self) -> &Signer<'info>;
+    fn recipient(&self) -> &UncheckedAccount<'info>;
 
     fn fee_owner(&self) -> &SystemAccount<'info>;
     fn fee_token0_account(&self) -> &Box<InterfaceAccount<'info, TokenAccount>>;
@@ -31,6 +32,8 @@ pub trait ZapCommonAccounts<'info> {
 
     fn signer_token0_account(&mut self) -> &mut Box<InterfaceAccount<'info, TokenAccount>>;
     fn signer_token1_account(&mut self) -> &mut Box<InterfaceAccount<'info, TokenAccount>>;
+    fn refund_token0_account(&self) -> &Box<InterfaceAccount<'info, TokenAccount>>;
+    fn refund_token1_account(&self) -> &Box<InterfaceAccount<'info, TokenAccount>>;
 
     fn memo_program(&self) -> &Program<'info, Memo>;
     fn token_vault_0(&self) -> &Box<InterfaceAccount<'info, TokenAccount>>;
@@ -59,6 +62,9 @@ macro_rules! impl_zap_common_accounts {
             fn signer(&self) -> &Signer<'info> {
                 &self.signer
             }
+            fn recipient(&self) -> &UncheckedAccount<'info> {
+                &self.recipient
+            }
 
             fn fee_owner(&self) -> &SystemAccount<'info> {
                 &self.fee_owner
@@ -85,6 +91,12 @@ macro_rules! impl_zap_common_accounts {
             }
             fn signer_token1_account(&mut self) -> &mut Box<InterfaceAccount<'info, TokenAccount>> {
                 &mut self.signer_token1_account
+            }
+            fn refund_token0_account(&self) -> &Box<InterfaceAccount<'info, TokenAccount>> {
+                &self.refund_token0_account
+            }
+            fn refund_token1_account(&self) -> &Box<InterfaceAccount<'info, TokenAccount>> {
+                &self.refund_token1_account
             }
 
             fn memo_program(&self) -> &Program<'info, Memo> {
@@ -223,7 +235,7 @@ fn derive_main_swap_price_limit(
 }
 
 /// remaining_accounts 两段拆分：[swap_remaining, SEP, action_remaining]
-fn split_remaining_accounts<'info>(
+pub fn split_remaining_accounts<'info>(
     remaining_accounts: &'info [AccountInfo<'info>],
 ) -> Result<(&'info [AccountInfo<'info>], &'info [AccountInfo<'info>])> {
     let sep = crate::ID;
@@ -272,6 +284,14 @@ fn finalize_return_amounts_for_target_token1(
     (return_amount_0, return_amount_1)
 }
 
+fn resolve_wsol_refund_destination(signer: Pubkey, recipient: Pubkey) -> Pubkey {
+    if signer == recipient {
+        signer
+    } else {
+        recipient
+    }
+}
+
 /// M2 修复：双向价格偏差检查。
 /// 原来只检查价格下跌（单向），对 token1->token0 方向的价格上涨无效。
 /// 现在检查 |current_price - quoted_price| <= quoted_price * slippage_bps / 10000。
@@ -317,6 +337,14 @@ pub fn prepare_zap_plan_and_swap_if_needed<'info>(
     swap_min_out: u64,
     swap_input_is_token0: bool,
 ) -> Result<ZapPlan<'info>> {
+    // refund 账户 authority 运行时校验：允许 signer 或 recipient（硬件钱包场景）
+    utils::validate_refund_authorities(
+        accounts.signer().key(),
+        accounts.recipient().key(),
+        accounts.refund_token0_account().owner,
+        accounts.refund_token1_account().owner,
+    )?;
+
     require!(
         tick_lower_index < tick_upper_index,
         LpDepositError::InvalidTickRange
@@ -405,17 +433,17 @@ pub fn prepare_zap_plan_and_swap_if_needed<'info>(
     if swap_amount_in > 0 {
         // price limit 只在实际 swap 时计算；当 swap_amount_in == 0 时
         // mode 不约束 swap_input_is_token0，延迟计算避免走到无效分支。
-        let main_swap_price_limit_x64 = derive_main_swap_price_limit(
-            tick_lower_index,
-            tick_upper_index,
-            swap_input_is_token0,
-            quoted_mode,
-        )?;
+        // let main_swap_price_limit_x64 = derive_main_swap_price_limit(
+        //     tick_lower_index,
+        //     tick_upper_index,
+        //     swap_input_is_token0,
+        //     quoted_mode,
+        // )?;
         swap_v2_common(
             accounts,
             swap_amount_in,
             swap_min_out,
-            main_swap_price_limit_x64,
+            0,
             swap_input_is_token0,
             swap_remaining_slice.to_vec(),
         )?;
@@ -781,10 +809,47 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
 
     // 这里必须先把 AccountInfo 拷贝出来，避免同时出现 &self / &mut self 的借用冲突
     let user_ai = accounts.signer().to_account_info();
+    let recipient_ai = accounts.recipient().to_account_info();
     let user_token0_ai = { accounts.signer_token0_account().to_account_info() };
     let user_token1_ai = { accounts.signer_token1_account().to_account_info() };
+    let refund_token0_ai = accounts.refund_token0_account().to_account_info();
+    let refund_token1_ai = accounts.refund_token1_account().to_account_info();
+    let vault_0_mint_ai = accounts.vault_0_mint().to_account_info();
+    let vault_1_mint_ai = accounts.vault_1_mint().to_account_info();
+    let vault_0_mint_decimals = accounts.vault_0_mint().decimals;
+    let vault_1_mint_decimals = accounts.vault_1_mint().decimals;
     let token_program_ai = accounts.token_program().to_account_info();
     let token_program_2022_ai = accounts.token_program_2022().to_account_info();
+
+    if !crate::consts::is_native_sol_mint(&accounts.vault_0_mint().key())
+        && refund_token0_ai.key() != user_token0_ai.key()
+    {
+        transfer_token_to_fee_accounts(
+            user_ai.clone(),
+            user_token0_ai.clone(),
+            refund_token0_ai,
+            vault_0_mint_ai,
+            vault_0_mint_decimals,
+            token_program_ai.clone(),
+            Some(token_program_2022_ai.clone()),
+            return_amount_0,
+        )?;
+    }
+
+    if !crate::consts::is_native_sol_mint(&accounts.vault_1_mint().key())
+        && refund_token1_ai.key() != user_token1_ai.key()
+    {
+        transfer_token_to_fee_accounts(
+            user_ai.clone(),
+            user_token1_ai.clone(),
+            refund_token1_ai,
+            vault_1_mint_ai,
+            vault_1_mint_decimals,
+            token_program_ai.clone(),
+            Some(token_program_2022_ai.clone()),
+            return_amount_1,
+        )?;
+    }
 
     // 若池子某侧 mint 为 wSOL(native mint)，则强制把对应的 signer token account close 成 SOL。
     // 这样无论 `recipient` 是否等于 `signer`，用户最终都只会收到 SOL（不残留 wSOL token）。
@@ -795,7 +860,13 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
         unwrap_wsol_to_destination(
             user_ai.clone(),
             user_token0_ai.clone(),
-            user_ai.clone(),
+            if resolve_wsol_refund_destination(user_ai.key(), recipient_ai.key())
+                == recipient_ai.key()
+            {
+                recipient_ai.clone()
+            } else {
+                user_ai.clone()
+            },
             token_program_ai.clone(),
             Some(token_program_2022_ai.clone()),
         )?;
@@ -804,7 +875,13 @@ pub fn swap_back_remaining_and_emit_increase_event<'info>(
         unwrap_wsol_to_destination(
             user_ai.clone(),
             user_token1_ai.clone(),
-            user_ai.clone(),
+            if resolve_wsol_refund_destination(user_ai.key(), recipient_ai.key())
+                == recipient_ai.key()
+            {
+                recipient_ai
+            } else {
+                user_ai.clone()
+            },
             token_program_ai.clone(),
             Some(token_program_2022_ai),
         )?;
@@ -1116,6 +1193,197 @@ fn transfer_token_common_accounts<'info>(
     Ok(())
 }
 
+/// 计算双币投入对应的 liquidity（扣除转账费后），并校验与 quoted liquidity 的滑点偏差。
+///
+/// 返回 `(computed_liquidity, tick_spacing)`，调用方按需使用。
+pub fn compute_and_validate_liquidity<'info>(
+    pool_state: &AccountLoader<'info, PoolState>,
+    tick_lower_index: i32,
+    tick_upper_index: i32,
+    vault_0_mint: &InterfaceAccount<'info, Mint>,
+    vault_1_mint: &InterfaceAccount<'info, Mint>,
+    amount_0_in: u64,
+    amount_1_in: u64,
+    quoted_liquidity: u128,
+    slippage_bps: u16,
+) -> Result<(u128, u16)> {
+    let pool = pool_state.load()?;
+    let sqrt_price_x64 = pool.sqrt_price_x64;
+    let tick_spacing = pool.tick_spacing;
+    drop(pool);
+
+    let sqrt_ratio_a_x64 = get_sqrt_price_at_tick(tick_lower_index)?;
+    let sqrt_ratio_b_x64 = get_sqrt_price_at_tick(tick_upper_index)?;
+
+    let amount_0_transfer_fee = utils::get_transfer_fee_for_amount(vault_0_mint, amount_0_in)?;
+    let amount_1_transfer_fee = utils::get_transfer_fee_for_amount(vault_1_mint, amount_1_in)?;
+    let amount_0_post_fee = amount_0_in
+        .checked_sub(amount_0_transfer_fee)
+        .ok_or(LpDepositError::MathOverflow)?;
+    let amount_1_post_fee = amount_1_in
+        .checked_sub(amount_1_transfer_fee)
+        .ok_or(LpDepositError::MathOverflow)?;
+
+    let computed_liquidity = liquidity_math::get_liquidity_from_amounts(
+        sqrt_price_x64,
+        sqrt_ratio_a_x64,
+        sqrt_ratio_b_x64,
+        amount_0_post_fee,
+        amount_1_post_fee,
+    );
+
+    validate_liquidity_slippage(computed_liquidity, quoted_liquidity, slippage_bps)?;
+    Ok((computed_liquidity, tick_spacing))
+}
+
+/// 校验链上计算的 liquidity 与 quoted liquidity 之差在滑点允许范围内。
+pub fn validate_liquidity_slippage(computed: u128, quoted: u128, slippage_bps: u16) -> Result<()> {
+    require!(quoted > 0, LpDepositError::InvalidDepositAmount);
+    let delta = if computed >= quoted {
+        computed - quoted
+    } else {
+        quoted - computed
+    };
+    // Raydium CLMM 的实际 liquidity 远低于 u128::MAX / 10_000，溢出只在理论极端值下触发，
+    // 此时 MathOverflow 是合理的 fail-safe 拒绝，不会静默放行。
+    let lhs = delta.checked_mul(10_000).ok_or(LpDepositError::MathOverflow)?;
+    let rhs = quoted.checked_mul(slippage_bps as u128).ok_or(LpDepositError::MathOverflow)?;
+    require!(lhs <= rhs, LpDepositError::LiquiditySlippageExceeded);
+    Ok(())
+}
+
+/// `settle_deposit_without_swap` 所需的账户集合。
+pub struct WithoutSwapSettleAccounts<'info> {
+    pub user: AccountInfo<'info>,
+    pub recipient: AccountInfo<'info>,
+    pub user_token0: AccountInfo<'info>,
+    pub user_token1: AccountInfo<'info>,
+    pub refund_token0: AccountInfo<'info>,
+    pub refund_token1: AccountInfo<'info>,
+    pub vault_0_mint: AccountInfo<'info>,
+    pub vault_1_mint: AccountInfo<'info>,
+    pub vault_0_mint_decimals: u8,
+    pub vault_1_mint_decimals: u8,
+    pub token_program: AccountInfo<'info>,
+    pub token_program_2022: AccountInfo<'info>,
+}
+
+/// `settle_deposit_without_swap` 所需的事件参数。
+pub struct WithoutSwapEventParams {
+    pub pool: Pubkey,
+    pub position_nft_mint: Pubkey,
+    pub token0_mint: Pubkey,
+    pub token1_mint: Pubkey,
+    pub tick_lower_index: i32,
+    pub tick_upper_index: i32,
+    pub computed_liquidity: u128,
+    pub amount_0_in: u64,
+    pub amount_1_in: u64,
+}
+
+/// CPI 完成后的统一结算：计算花费/剩余、发出事件、退回剩余 token、unwrap wSOL。
+///
+/// 调用方需在调用此函数前完成 signer_token_account reload，并传入 reload 后的余额。
+pub fn settle_deposit_without_swap<'info>(
+    accs: WithoutSwapSettleAccounts<'info>,
+    event: WithoutSwapEventParams,
+    balance_0_before: u64,
+    balance_0_after: u64,
+    balance_1_before: u64,
+    balance_1_after: u64,
+) -> Result<()> {
+    let spent_0 = balance_0_before.checked_sub(balance_0_after).unwrap_or_else(|| {
+        msg!("WARN: spent_0 underflow: pre={}, after={}", balance_0_before, balance_0_after);
+        0
+    });
+    let spent_1 = balance_1_before.checked_sub(balance_1_after).unwrap_or_else(|| {
+        msg!("WARN: spent_1 underflow: pre={}, after={}", balance_1_before, balance_1_after);
+        0
+    });
+    let leftover_0 = event.amount_0_in.checked_sub(spent_0).unwrap_or_else(|| {
+        msg!("WARN: leftover_0 underflow: max={}, spent={}", event.amount_0_in, spent_0);
+        0
+    });
+    let leftover_1 = event.amount_1_in.checked_sub(spent_1).unwrap_or_else(|| {
+        msg!("WARN: leftover_1 underflow: max={}, spent={}", event.amount_1_in, spent_1);
+        0
+    });
+
+    emit!(LpHandlerIncreaseLiquidityEvent {
+        pool: event.pool,
+        position_nft_mint: event.position_nft_mint,
+        principal_0: spent_0,
+        principal_1: spent_1,
+        token0_mint: event.token0_mint,
+        token1_mint: event.token1_mint,
+        tick_lower_index: event.tick_lower_index,
+        tick_upper_index: event.tick_upper_index,
+        liquidity: event.computed_liquidity,
+        amount_0_in: event.amount_0_in,
+        amount_1_in: event.amount_1_in,
+        return_amount_0: leftover_0,
+        return_amount_1: leftover_1,
+    });
+
+    if !crate::consts::is_native_sol_mint(&accs.vault_0_mint.key())
+        && accs.refund_token0.key() != accs.user_token0.key()
+    {
+        transfer_token_to_fee_accounts(
+            accs.user.clone(),
+            accs.user_token0.clone(),
+            accs.refund_token0,
+            accs.vault_0_mint.clone(),
+            accs.vault_0_mint_decimals,
+            accs.token_program.clone(),
+            Some(accs.token_program_2022.clone()),
+            leftover_0,
+        )?;
+    }
+
+    if !crate::consts::is_native_sol_mint(&accs.vault_1_mint.key())
+        && accs.refund_token1.key() != accs.user_token1.key()
+    {
+        transfer_token_to_fee_accounts(
+            accs.user.clone(),
+            accs.user_token1.clone(),
+            accs.refund_token1,
+            accs.vault_1_mint.clone(),
+            accs.vault_1_mint_decimals,
+            accs.token_program.clone(),
+            Some(accs.token_program_2022.clone()),
+            leftover_1,
+        )?;
+    }
+
+    let wsol_dest = if accs.user.key() == accs.recipient.key() {
+        accs.user.clone()
+    } else {
+        accs.recipient.clone()
+    };
+
+    if crate::consts::is_native_sol_mint(&accs.vault_0_mint.key()) {
+        unwrap_wsol_to_destination(
+            accs.user.clone(),
+            accs.user_token0,
+            wsol_dest.clone(),
+            accs.token_program.clone(),
+            Some(accs.token_program_2022.clone()),
+        )?;
+    }
+
+    if crate::consts::is_native_sol_mint(&accs.vault_1_mint.key()) {
+        unwrap_wsol_to_destination(
+            accs.user,
+            accs.user_token1,
+            wsol_dest,
+            accs.token_program,
+            Some(accs.token_program_2022),
+        )?;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1216,5 +1484,48 @@ mod tests {
 
         assert_eq!(return_amount_0, 100);
         assert_eq!(return_amount_1, 200);
+    }
+
+    #[test]
+    fn refund_settlement_uses_signer_for_wsol_when_recipient_matches_signer() {
+        let signer = Pubkey::new_unique();
+        let destination = resolve_wsol_refund_destination(signer, signer);
+        assert_eq!(destination, signer);
+    }
+
+    #[test]
+    fn refund_settlement_uses_recipient_for_wsol_when_distinct() {
+        let signer = Pubkey::new_unique();
+        let recipient = Pubkey::new_unique();
+        let destination = resolve_wsol_refund_destination(signer, recipient);
+        assert_eq!(destination, recipient);
+    }
+
+    #[test]
+    fn liquidity_slippage_accepts_zero_delta() {
+        assert!(validate_liquidity_slippage(1_000_000, 1_000_000, 100).is_ok());
+    }
+
+    #[test]
+    fn liquidity_slippage_accepts_within_tolerance() {
+        assert!(validate_liquidity_slippage(1_000_100, 1_000_000, 100).is_ok());
+    }
+
+    #[test]
+    fn liquidity_slippage_rejects_exceeds_tolerance() {
+        let err = validate_liquidity_slippage(1_000_200, 1_000_000, 1).unwrap_err();
+        assert_eq!(err, LpDepositError::LiquiditySlippageExceeded.into());
+    }
+
+    #[test]
+    fn liquidity_slippage_rejects_zero_quoted() {
+        let err = validate_liquidity_slippage(1000, 0, 100).unwrap_err();
+        assert_eq!(err, LpDepositError::InvalidDepositAmount.into());
+    }
+
+    #[test]
+    fn liquidity_slippage_accepts_boundary() {
+        // delta=50_000, slippage=100 bps(1%)，边界值恰好等于阈值 → ok
+        assert!(validate_liquidity_slippage(4_950_000, 5_000_000, 100).is_ok());
     }
 }

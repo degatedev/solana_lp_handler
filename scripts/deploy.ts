@@ -2,8 +2,12 @@ import fs from 'node:fs';
 import { execSync, spawnSyncOptions, userWallet } from './help';
 import { Keypair } from '@solana/web3.js';
 import { buildAnchorBuildEnv } from './deploy_config';
+import { verifySecurityBoundaryFromBaseline } from './security_boundary';
 
 export const deploy = async () => {
+  console.log('检查固定安全边界文件摘要...');
+  const boundaryDigest = verifySecurityBoundaryFromBaseline();
+  console.log('固定安全边界文件摘要检查通过:', boundaryDigest);
   console.log('生成合约id');
   execSync('solana-keygen', [
     'new',

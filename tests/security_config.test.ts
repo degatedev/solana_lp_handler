@@ -5,9 +5,30 @@ import {
   TransactionMessage,
   VersionedTransaction
 } from '@solana/web3.js';
-import { connection, fee_address, pool_address, pools, program, securityConfig, user, userWallet } from './help';
+import {
+  connection,
+  ensureSecurityConfig,
+  fee_address,
+  pool_address,
+  pools,
+  program,
+  resetSimAccount,
+  securityConfig,
+  submitTransaction,
+  user
+} from './help';
 
 describe('pool_whitelist', () => {
+  // 这三个用例会真实创建 / 更新 / 关闭 SecurityConfig PDA。
+  // 先重置到未初始化状态让 init 可跑，跑完再恢复基准白名单，避免污染其他套件。
+  beforeAll(async () => {
+    await resetSimAccount(securityConfig);
+  }, 200000);
+
+  afterAll(async () => {
+    await ensureSecurityConfig();
+  }, 200000);
+
   it('builds init_pool_whitelist ', async () => {
     // 说明：这里用 any 绕过 target/types 未及时更新导致的 TS 类型问题；
     // 运行前请确保你已 anchor build 生成最新 IDL/types。
@@ -33,13 +54,7 @@ describe('pool_whitelist', () => {
       }).compileToV0Message()
     );
 
-    userWallet.signTransaction(tx);
-
-    const sim = await connection.simulateTransaction(tx, {
-      sigVerify: false,
-      replaceRecentBlockhash: true,
-      innerInstructions: true
-    });
+    const sim = await submitTransaction(tx);
     expect(sim.value.err).toBeNull();
   }, 200000);
   it('builds  update_pool_whitelist instructions', async () => {
@@ -67,13 +82,7 @@ describe('pool_whitelist', () => {
       }).compileToV0Message()
     );
 
-    userWallet.signTransaction(tx);
-
-    const sim = await connection.simulateTransaction(tx, {
-      sigVerify: false,
-      replaceRecentBlockhash: true,
-      innerInstructions: true
-    });
+    const sim = await submitTransaction(tx);
     expect(sim.value.err).toBeNull();
   }, 200000);
   it('builds closeSecurityConfig ', async () => {
@@ -98,16 +107,7 @@ describe('pool_whitelist', () => {
       }).compileToV0Message()
     );
 
-    userWallet.signTransaction(tx);
-
-    const sim = await connection.simulateTransaction(tx, {
-      sigVerify: false,
-      replaceRecentBlockhash: true,
-      innerInstructions: true
-    });
-
-    // 这个测试的目标是“指令可构造 + 可跑到合约入口”。
-    // 在 mainnet 上 PDA 可能已存在/authority 可能不匹配，simulate 可能失败；所以不强制要求 err==null。
+    const sim = await submitTransaction(tx);
     expect(sim.value.err).toBeNull();
   }, 200000);
 });

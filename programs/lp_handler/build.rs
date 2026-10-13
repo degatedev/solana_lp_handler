@@ -3,8 +3,8 @@ use std::{env, fs, path::PathBuf};
 fn main() {
     println!("cargo:rerun-if-env-changed=SECURITY_ADMIN");
 
-    let security_admin = env::var("SECURITY_ADMIN")
-        .expect("SECURITY_ADMIN must be set before building lp_handler");
+    let security_admin =
+        env::var("SECURITY_ADMIN").expect("SECURITY_ADMIN must be set before building lp_handler");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR must exist"));
     let output = out_dir.join("security_admin.rs");

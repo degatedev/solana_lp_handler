@@ -2,7 +2,9 @@ use anchor_lang::prelude::*;
 use raydium_amm_v3::cpi as clmm_cpi;
 use raydium_amm_v3::cpi::accounts as clmm_accounts;
 use raydium_amm_v3::program::AmmV3;
-use raydium_amm_v3::states::{AmmConfig, ObservationState, PoolState, TickArrayState, TICK_ARRAY_SEED};
+use raydium_amm_v3::states::{
+    AmmConfig, ObservationState, PoolState, TickArrayState, TICK_ARRAY_SEED,
+};
 
 use crate::SECURITY_CONFIG_SEED;
 
@@ -38,6 +40,7 @@ pub struct SwapAndDeposit<'info> {
     pub raydium_clmm_program: Program<'info, AmmV3>,
 
     /// CHECK: position NFT 的接收者（owner）。安全层会校验其 authority 关系 必须定义到第二个账户，前端需要校验recipient 地址
+    #[account(mut)]
     pub recipient: UncheckedAccount<'info>,
 
     /// 支付者 / 签名者
@@ -57,6 +60,20 @@ pub struct SwapAndDeposit<'info> {
         token::authority = signer,
     )]
     pub signer_token1_account: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    /// refund 账户的 authority 在运行时校验为 recipient 或 signer（支持硬件钱包场景）
+    #[account(
+        mut,
+        token::mint = token_vault_0.mint,
+    )]
+    pub refund_token0_account: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    /// refund 账户的 authority 在运行时校验为 recipient 或 signer（支持硬件钱包场景）
+    #[account(
+        mut,
+        token::mint = token_vault_1.mint,
+    )]
+    pub refund_token1_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
     /// AMM 配置账户（swap 和 position 都需要通过 pool_state 关联）
     #[account(address = pool_state.load()?.amm_config)]

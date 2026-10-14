@@ -1,3 +1,5 @@
+**Notice:** Due to our migration to Ethereum, this contract is deprecated and no longer eligible for bounties.   
+
 # lp_handler Contract Technical Documentation
 
 ## Table of Contents
